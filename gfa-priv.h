@@ -77,15 +77,19 @@ typedef struct {
 	int64_t i_term;
 } gfa_edopt_t;
 
+//This thing appears to be some kind of alignment result, but it is most
+//interesting that it does not hold a sequence, or cigar, or dp, or anything
+//base level alignment related. I do wonder if somehow we are using gwfa to not
+//do complete base alignment, and just get the path through the graph
 typedef struct {
-	int32_t s;
-	uint32_t end_v;
-	int32_t end_off;
+	int32_t s; //score (if naming conventions are consistent.)
+	uint32_t end_v; //why is only this one uint?
+	int32_t end_off; //end offset
 	int32_t wlen; // length of walk
 	int32_t n_end;
-	int32_t nv;
+	int32_t nv; //length of the path
 	int64_t n_iter;
-	int32_t *v;
+	int32_t *v; //nodes on the path
 } gfa_edrst_t;
 
 void gfa_edopt_init(gfa_edopt_t *opt);

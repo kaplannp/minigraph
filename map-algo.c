@@ -345,9 +345,9 @@ void mg_map_frag(const mg_idx_t *gi, int n_segs, const int *qlens, const char **
 	int64_t n_a;
 	uint64_t *u;
 	int32_t *mini_pos;
-	mg128_t *a;
+	mg128_t *a; //alignment?
 	mg128_v mv = {0,0,0};
-	mg_lchain_t *lc;
+	mg_lchain_t *lc; //presumably this is an array of linear chains
 	char *seq_cat;
 	km_stat_t kmst;
 	float tmp, chn_pen_gap, chn_pen_skip;
@@ -461,6 +461,8 @@ void mg_map_frag(const mg_idx_t *gi, int n_segs, const int *qlens, const char **
 	n_gc = mg_gchain1_dp(b->km, gi->g, &n_lc, lc, qlen_sum, opt->bw_long, opt->bw_long, opt->bw_long, opt->max_gc_skip, opt->ref_bonus,
 						 chn_pen_gap, chn_pen_skip, opt->mask_level, a, &u);
 	if (mg_dbg_flag & MG_DBG_QNAME) t = print_time(t, 3, qname);
+  //zkn this is a bottleneck function
+  //This produces a path through the graph connecnting the anchors
 	gcs[0] = mg_gchain_gen(0, b->km, gi->g, gi->es, n_gc, u, lc, a, hash, opt->min_gc_cnt, opt->min_gc_score, opt->gdp_max_ed, n_segs, seq_cat);
 	if (mg_dbg_flag & MG_DBG_QNAME) t = print_time(t, 4, qname);
 	gcs[0]->rep_len = rep_len;
@@ -472,6 +474,9 @@ void mg_map_frag(const mg_idx_t *gi, int n_segs, const int *qlens, const char **
 	mg_gchain_flt_sub(opt->pri_ratio, gi->k * 2, opt->best_n, gcs[0]->n_gc, gcs[0]->gc);
 	mg_gchain_drop_flt(b->km, gcs[0]);
 	mg_gchain_set_mapq(b->km, gcs[0], qlen_sum, mv.n, opt->min_gc_score);
+  //zkn this is the part that seems to be run. This gchain cigar is kinda slow
+  //The gchain cigar is doing wfa alignment on the path that was produced by the
+  //gchain gen. That is why it is slow
 	if ((opt->flag&MG_M_CIGAR) && n_segs == 1) {
 		mg_gchain_cigar(b->km, gi->g, gi->es, seq_cat, gcs[0], qname);
 		mg_gchain_gen_ds(b->km, gi->g, gi->es, seq_cat, gcs[0]);

@@ -421,12 +421,15 @@ static int32_t get_mini_idx(const mg128_t *a, int32_t n, const int32_t *mini_pos
 	return -1;
 }
 
-/* Before:
+/* 
+ * zkn!!! Finally! we shall know what a is !!!!! it appears to be anchors!
+ * btw. I think t often means reference
+ * Before:
  *   a[].x: tid<<33 | rev<<32 | tpos
  *   a[].y: flags<<40 | q_span<<32 | q_pos
  * After:
  *   a[].x: mini_pos<<32 | tpos
- *   a[].y: same
+ *   a[].y: same //and when he says same, he probably means query_pos?
  */
 void mg_update_anchors(int32_t n_a, mg128_t *a, int32_t n, const int32_t *mini_pos)
 {

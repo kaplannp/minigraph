@@ -300,12 +300,14 @@ void mg_gchain_extra(const gfa_t *g, mg_gchains_t *gs)
  * Generate graph chains
  */
 typedef struct {
-	void *km;
+	void *km; //this is a kalloc handler? 
 	const gfa_t *g;
-	const gfa_edseq_t *es;
-	const char *qseq;
-	int32_t n_seg, n_llc, m_llc, n_a;
-	mg_llchain_t *llc;
+	const gfa_edseq_t *es; //A gfa_edseq_t is a sequence. literally char*+len
+	const char *qseq; //query sequence
+	int32_t n_seg, n_llc, m_llc, n_a; //presumably lc is linear chain, so perahps 
+                                    //this relates to the two chains we pass as
+                                    //other arguments to the kernel
+	mg_llchain_t *llc; //offset, count, vertex, score, edit distance
 } bridge_aux_t;
 
 static inline void copy_lchain(mg_llchain_t *q, const mg_lchain_t *p, int32_t *n_a, mg128_t *a_new, const mg128_t *a_old, int32_t ed)
@@ -346,13 +348,33 @@ static int32_t bridge_shortk(bridge_aux_t *aux, const mg_lchain_t *l0, const mg_
 	return 0;
 }
 
+/*zkn
+ * This function attempts to connect two linear chains together via wfa 
+ * alignment. Recall from the algorithm that there are a lot of chains of linear
+ * nodes and we try to fill in the gaps with this gwfa. Within those nodes it is
+ * ok to do linear wfa. It would appear that this gwfa is applied before the
+ * linear wfa within nodes. Seems surprising to me, but what can you do. I
+ * suppose they use an approximate mapping to get the nodes, and then they apply
+ * the graph linkage. Maybe this lets you avoid base level alignment within node
+ * if it doesn't have a useful connection anyways
+ * aux has the graph
+ * ed is perhaps edit distance? As in the score in the dp matrix? It is always
+ *    passed as -1
+ * gdp_max_ed perhaps a banding parameter for the edit distance at which to
+ *    drop? It seems to be defaulted to 10000 in options.c. Perhaps it is
+ *    overwritten somewhere else
+ * kmer_size is derived from the mysterious variable, a. Just copy it as you go.
+*/
 static int32_t bridge_gwfa(bridge_aux_t *aux, int32_t kmer_size, int32_t gdp_max_ed, const mg_lchain_t *l0, const mg_lchain_t *l1, int32_t *ed)
 {
+  //start and end verticies
 	uint32_t v0 = l0->v, v1 = l1->v;
+  //qe is query end. qs is query start. end0 and end1 appear to be reference
+  //ends found in both verticies
 	int32_t qs = l0->qe - kmer_size, qe = l1->qs + kmer_size, end0, end1, j;
 	void *z;
 	gfa_edopt_t opt;
-	gfa_edrst_t r;
+	gfa_edrst_t r; //This appears to be some kind of path
 
 	*ed = -1;
 	end0 = l0->re - kmer_size;
@@ -361,12 +383,24 @@ static int32_t bridge_gwfa(bridge_aux_t *aux, int32_t kmer_size, int32_t gdp_max
 	gfa_edopt_init(&opt);
 	opt.traceback = 1, opt.max_chk = 1000, opt.bw_dyn = 1000, opt.max_lag = gdp_max_ed/2;
 	opt.i_term = 500000000LL;
+  //This thing basically assigns all those classes to a void* pointer
 	z = gfa_ed_init(aux->km, &opt, aux->g, aux->es, qe - qs, &aux->qseq[qs], v0, end0);
+  //I think this is where gfwa is actually run. The last important piece of this
+  //function. The starts, query, graph, query length, and more  are encoded in 
+  //z, the ends are passed.
+  //It is also important to note z is immediately destroyed, this implies that z
+  //does not have useful information, but I could be wrong. Perhaps only the
+  //pointers in z are removed, the data is left. max_ed should probably be an
+  //opt in z, but maybe it's just historical. Strangely r is unitialized. recall
+  //r is a path. Nah, I think the destroy must not actually destroy. If we look
+  //at the inputs, I think the result must be stored somewhere within aux.
+  //Actually maybe it is ed
 	gfa_ed_step(z, v1, end1, gdp_max_ed, &r);
 	gfa_ed_destroy(z);
 	//fprintf(stdout, "qs=%d,qe=%d,v0=%c%s:%d:%d,v1=%c%s:%d,s=%d,nv=%d\n", qs, qe, "><"[v0&1], aux->g->seg[v0>>1].name, end0, aux->g->seg[v0>>1].len - end0 - 1, "><"[v1&1], aux->g->seg[v1>>1].name, end1, r.s, r.nv);
 	if (r.s < 0) return 0;
 
+  //Don't know what this part is about
 	for (j = 1; j < r.nv - 1; ++j) {
 		mg_llchain_t *q;
 		if (aux->n_llc == aux->m_llc) KEXPAND(aux->km, aux->llc, aux->m_llc);
@@ -376,10 +410,11 @@ static int32_t bridge_gwfa(bridge_aux_t *aux, int32_t kmer_size, int32_t gdp_max
 		q->ed = -1;
 	}
 	kfree(aux->km, r.v);
-	*ed = r.s;
+	*ed = r.s; //actually, this could also be the output
 	return 1;
 }
 
+//zkn presumably l0 is a node with a linear chain, and l1 is another node
 static int32_t bridge_lchains(mg_gchains_t *gc, bridge_aux_t *aux, int32_t kmer_size, int32_t gdp_max_ed, const mg_lchain_t *l0, const mg_lchain_t *l1, const mg128_t *a)
 {
 	if (l1->v != l0->v) { // bridging two segments

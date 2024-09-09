@@ -113,13 +113,15 @@ static size_t gwf_intv_merge2(gwf_intv_t *a, size_t n_b, const gwf_intv_t *b, si
 
 /*
  * Diagonal
+ * Observe that there are no arrays. This implies that it must be a single
+ * diagonal not a wavefront
  */
 typedef struct { // a diagonal
 	uint64_t vd; // higher 32 bits: vertex ID; lower 32 bits: diagonal+0x4000000
-	int32_t k;
+	int32_t k; //this is how much we've pushed down diagonal I think (d in paper)
 	int32_t len;
 	uint32_t xo; // higher 31 bits: anti diagonal; lower 1 bit: out-of-order or not
-	int32_t t;
+	int32_t t; //By process of elimination this is score? Or they have no score
 } gwf_diag_t;
 
 typedef kvec_t(gwf_diag_t) gwf_diag_v;
@@ -138,13 +140,16 @@ static inline void gwf_diag_push(void *km, gwf_diag_v *a, uint32_t v, int32_t d,
 }
 
 // determine the wavefront on diagonal (v,d)
+//zkn ok, so this d is what we would usually call k from the paper. It is the
+//index of the diagonal.  In contrast k is the distance which we would usually
+//call d in the paper.
 static inline int32_t gwf_diag_update(gwf_diag_t *p, uint32_t v, int32_t d, int32_t k, uint32_t x, uint32_t ooo, int32_t t)
 {
 	uint64_t vd = gwf_gen_vd(v, d);
 	if (p->vd == vd) {
 		p->xo = p->k > k? p->xo : x<<1|ooo;
 		p->t  = p->k > k? p->t : t;
-		p->k  = p->k > k? p->k : k;
+		p->k  = p->k > k? p->k : k; 
 		return 0;
 	}
 	return 1;
@@ -301,6 +306,8 @@ static int32_t gwf_prune(int32_t n_a, gwf_diag_t *a, uint32_t max_lag, int32_t b
 	return j;
 }
 
+//zkn this is the function that pushes the wavefront along the diagonal with
+//matches. We do examine the query here
 // reach the wavefront
 static inline int32_t gwf_extend1(int32_t d, int32_t k, int32_t vl, const char *ts, int32_t ql, const char *qs)
 {
@@ -401,12 +408,14 @@ static void gwf_ed_extend_batch(void *km, const gfa_t *g, const gfa_edseq_t *es,
 	B->n += m;
 }
 
+//This function demonstrates, 1) that we are not doing affine gap, and 2) that
+//we are doing base level alignment
 // wfa_extend and wfa_next combined
 static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const gfa_t *g, const gfa_edseq_t *es, int32_t s, int32_t ql, const char *q,
 								 uint32_t v1, int32_t off1, int32_t *end_tb, int32_t *n_a_, gwf_diag_t *a, gfa_edrst_t *r)
 {
 	int32_t i, x, n = *n_a_, do_dedup = 1;
-	kdq_t(gwf_diag_t) *A;
+	kdq_t(gwf_diag_t) *A; //A is the queue containing the verticies to look at!
 	gwf_diag_v B = {0,0,0};
 	gwf_diag_t *b;
 
@@ -434,7 +443,7 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 	kfree(buf->km, a); // $a is not used as it has been copied to $A
 
 	while (kdq_size(A)) {
-		gwf_diag_t t;
+		gwf_diag_t t; 
 		uint32_t v, x0;
 		int32_t ooo, d, k, i, vl;
 
@@ -443,17 +452,23 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 		d = (int32_t)t.vd - GWF_DIAG_SHIFT; // diagonal
 		k = t.k; // wavefront position on the vertex
 		vl = es[v].len; // $vl is the vertex length
-		k = gwf_extend1(d, k, vl, es[v].seq, ql, q);
+		k = gwf_extend1(d, k, vl, es[v].seq, ql, q); //push along diagonal far as you can
 		i = k + d; // query position
 		x0 = (t.xo >> 1) + ((k - t.k) << 1); // current anti diagonal
 
 		if (k + 1 < vl && i + 1 < ql) { // the most common case: the wavefront is in the middle
 			int32_t push1 = 1, push2 = 1;
+      //So somehow, B.a appears to hold the wavefront
+      // I believe these first two are the cases of the switch statement. They
+      // are the initial updates from previous scores that is. (and there isn't
+      // any affine gap)
 			if (B.n >= 2) push1 = gwf_diag_update(&B.a[B.n - 2], v, d-1, k+1, x0 + 1, ooo, t.t);
 			if (B.n >= 1) push2 = gwf_diag_update(&B.a[B.n - 1], v, d,   k+1, x0 + 2, ooo, t.t);
+      //Now we add it to the queue. When did we extend it?
 			if (push1)          gwf_diag_push(buf->km, &B, v, d-1, k+1, x0 + 1, 1, t.t);
 			if (push2 || push1) gwf_diag_push(buf->km, &B, v, d,   k+1, x0 + 2, 1, t.t);
 			gwf_diag_push(buf->km, &B, v, d+1, k, x0 + 1, ooo, t.t);
+    //This else is the branchy weirdness part where you keep pushing along edges
 		} else if (i + 1 < ql) { // k + 1 == g->len[v]; reaching the end of the vertex but not the end of query
 			int32_t nv = gfa_arc_n(g, v), j, n_ext = 0, tw = -1;
 			gfa_arc_t *av = gfa_arc_a(g, v);
@@ -538,14 +553,14 @@ static void gwf_ed_print_intv(size_t n, gwf_intv_t *a) // for debugging only
 }
 
 typedef struct {
-	const gfa_t *g;
-	const gfa_edseq_t *es;
-	const gfa_edopt_t *opt;
-	int32_t ql;
-	const char *q;
+	const gfa_t *g; //graph
+	const gfa_edseq_t *es; //edit sequence?
+	const gfa_edopt_t *opt; //options
+	int32_t ql; // query length
+	const char *q; // query
 	gwf_edbuf_t buf;
 	int32_t s, n_a;
-	gwf_diag_t *a;
+	gwf_diag_t *a; //oh, is that what a's are? diagonals?
 	int32_t end_tb;
 } gfa_edbuf_t;
 
@@ -567,20 +582,31 @@ void *gfa_ed_init(void *km, const gfa_edopt_t *opt, const gfa_t *g, const gfa_ed
 	return z;
 }
 
+/*
+ * s_term seems to be the maximum edit distance allowed in the dynamic
+ *        progrmming matrix. It is a termination condition which triggers if the
+ *        score (s) in H_{s,v,k} becomes too high
+ * i_term this is within z->opt. It looks like another early stopping condition
+ */
 void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_t *r)
 {
 	gfa_edbuf_t *z = (gfa_edbuf_t*)z_;
 	const gfa_edopt_t *opt = z->opt;
 	if (s_term < 0 && z->opt->s_term >= 0) s_term = z->opt->s_term;
 	r->n_end = 0, r->n_iter = 0;
+  //This for loop consists of the extend funciton, and a bunch of termination
+  //condition behaviour
 	while (z->n_a > 0) {
 		z->a = gwf_ed_extend(&z->buf, opt, z->g, z->es, z->s, z->ql, z->q, v1, off1, &z->end_tb, &z->n_a, z->a, r);
 		r->n_iter += z->n_a; // + z->buf.intv.n;
-		if (r->end_off >= 0 || z->n_a == 0) break;
+		if (r->end_off >= 0 || z->n_a == 0) break; //end offset probably only 
+                                               //becomes >=0 when you reach the
+                                               //end of a node. So this is
+                                               //standard stopping condition
 		if (r->n_end > 0) break;
-		if (s_term >= 0 && z->s >= s_term) break;
+		if (s_term >= 0 && z->s >= s_term) break; //terminate if score is outta ctrl
 		if (z->opt->i_term > 0 && r->n_iter > z->opt->i_term) break;
-		++z->s;
+		++z->s; //I guess this is (z->s)++. It makes me think s is the score
 		if (gfa_ed_dbg >= 1) {
 			printf("[%s] dist=%d, n=%d, n_intv=%ld, n_tb=%ld\n", __func__, z->s, z->n_a, z->buf.intv.n, z->buf.t.n);
 			if (gfa_ed_dbg == 2) gwf_ed_print_diag(z->g, z->n_a, z->a);

@@ -44,17 +44,23 @@ void mg_gchain_cigar(void *km, const gfa_t *g, const gfa_edseq_t *es, const char
 	mg64_v cigar = {0,0,0};
 	km2 = km_init2(km, 0);
 	for (i = 0; i < gt->n_gc; ++i) {
-		mg_gchain_t *gc = &gt->gc[i];
+		mg_gchain_t *gc = &gt->gc[i]; //so right off the bat we extract the gc
 		int32_t l0 = gc->off;
 		int32_t off_a0 = gt->lc[l0].off;
 		int32_t j, j0 = 0, k, l;
 		cigar.n = 0;
 		append_cigar1(km, &cigar, 7, gt->a[off_a0].y>>32&0xff);
+    //zkn I *think* that the idea here is that you will do wfa alignment (not
+    //grtaph version) so as to get alignments for each of the linear node
+    //sections
+    //zkn I also believe mwf probably means minimap2 wave front
+    //zkn I also believe mg_ prefix probably means minigraph
 		for (j = 1; j < gc->n_anchor; ++j) {
 			const mg128_t *q, *p = &gt->a[off_a0 + j];
 			if ((p->y & MG_SEED_IGNORE) && j != gc->n_anchor - 1) continue;
 			q = &gt->a[off_a0 + j0];
 			// find the lchain that contains the anchor
+      // zkn this is represented by l, and index
 			for (l = l0; l < gc->off + gc->cnt; ++l) {
 				mg_llchain_t *r = &gt->lc[l];
 				if (off_a0 + j >= r->off && off_a0 + j < r->off + r->cnt)
@@ -103,6 +109,7 @@ void mg_gchain_cigar(void *km, const gfa_t *g, const gfa_edseq_t *es, const char
 					mwf_rst_t rst;
 					mwf_opt_init(&opt);
 					opt.flag |= MWF_F_CIGAR;
+          //zkn here is where you perform the alignment
 					mwf_wfa_auto(km2, &opt, l_seq, seq, qlen, qs, &rst);
 					append_cigar(km, &cigar, rst.n_cigar, rst.cigar);
 					kfree(km2, rst.cigar);
@@ -123,6 +130,8 @@ void mg_gchain_cigar(void *km, const gfa_t *g, const gfa_edseq_t *es, const char
 			}
 			j0 = j, l0 = l;
 		}
+    //interesting. So we are updating the cigar string later after we've done
+    //the bridge graph thing
 		// save the CIGAR to gt->gc[i]
 		gc->p = (mg_cigar_t*)kcalloc(gt->km, 1, cigar.n * 8 + sizeof(mg_cigar_t));
 		gc->p->ss = (int32_t)gt->a[off_a0].x + 1 - (int32_t)(gt->a[off_a0].y>>32&0xff);

@@ -133,7 +133,9 @@ typedef struct {
 	uint32_t hash;
 	int32_t subsc, n_sub;
 	uint32_t mapq:8, flt:1, dummy:23;
-	mg_cigar_t *p;
+	mg_cigar_t *p; //Since this has a cigar string, it would seem that you've 
+                 //already aligned once you're returned this. I suppose it could
+                 //be uninitialized
 	mg_ds_t ds;
 } mg_gchain_t;
 
