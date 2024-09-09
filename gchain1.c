@@ -348,7 +348,7 @@ static int32_t bridge_shortk(bridge_aux_t *aux, const mg_lchain_t *l0, const mg_
 	return 0;
 }
 
-/*zkn
+/*zkn This is out kernel bridge_gwfa
  * This function attempts to connect two linear chains together via wfa 
  * alignment. Recall from the algorithm that there are a lot of chains of linear
  * nodes and we try to fill in the gaps with this gwfa. Within those nodes it is
