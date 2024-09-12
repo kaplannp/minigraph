@@ -15,8 +15,8 @@ mg_tbuf_t *mg_tbuf_init(void)
 {
 	mg_tbuf_t *b;
 	b = (mg_tbuf_t*)calloc(1, sizeof(mg_tbuf_t));
-	if (!(mg_dbg_flag & MG_DBG_NO_KALLOC)) b->km = km_init();
-	return b;
+	if (!(mg_dbg_flag & MG_DBG_NO_KALLOC)) b->km = km_init(); //this is the money line
+	return b; //zkn b means buffer!
 }
 
 void mg_tbuf_destroy(mg_tbuf_t *b)
@@ -339,6 +339,7 @@ static double print_time(double t0, int stage, const char *qname)
 
 void mg_map_frag(const mg_idx_t *gi, int n_segs, const int *qlens, const char **seqs, mg_gchains_t **gcs, mg_tbuf_t *b, const mg_mapopt_t *opt, const char *qname)
 {
+  //zkn it appears that gi->es is not modified in this function
 	int i, l, rep_len, qlen_sum, n_lc, n_gc, n_mini_pos;
 	int max_chain_gap_qry, max_chain_gap_ref, is_splice = !!(opt->flag & MG_M_SPLICE), is_sr = !!(opt->flag & MG_M_SR);
 	uint32_t hash;

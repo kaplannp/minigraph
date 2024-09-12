@@ -408,8 +408,7 @@ static void gwf_ed_extend_batch(void *km, const gfa_t *g, const gfa_edseq_t *es,
 	B->n += m;
 }
 
-//This function demonstrates, 1) that we are not doing affine gap, and 2) that
-//we are doing base level alignment
+//This function demonstrates, that we are not doing affine gap, and
 // wfa_extend and wfa_next combined
 static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const gfa_t *g, const gfa_edseq_t *es, int32_t s, int32_t ql, const char *q,
 								 uint32_t v1, int32_t off1, int32_t *end_tb, int32_t *n_a_, gwf_diag_t *a, gfa_edrst_t *r)

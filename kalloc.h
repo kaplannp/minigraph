@@ -35,6 +35,10 @@ void km_stat_print(const void *km);
 #define KCALLOC(km, ptr, len) ((ptr) = (__typeof__(ptr))kcalloc((km), (len), sizeof(*(ptr))))
 #define KREALLOC(km, ptr, len) ((ptr) = (__typeof__(ptr))krealloc((km), (ptr), (len) * sizeof(*(ptr))))
 
+//a is llc, m is m_llc
+//zkn. As I understand it, this code is used to dynamically resize an array. 
+//If m_llc (the size of the current vector) hasn't been initialized (is less
+//than 4), it initializes it to 16. Otherwise it doubles it.
 #define KEXPAND(km, a, m) do { \
 		(m) = (m) >= 4? (m) + ((m)>>1) : 16; \
 		KREALLOC((km), (a), (m)); \

@@ -5,6 +5,9 @@
 #include "khashl.h" // for kh_hash_uint32()
 #include "gfa-priv.h"
 
+#include "serialization.h"
+#include "deserialization.h"
+
 typedef struct {
 	uint32_t srt;
 	int32_t i;
@@ -298,17 +301,21 @@ void mg_gchain_extra(const gfa_t *g, mg_gchains_t *gs)
 
 /*
  * Generate graph chains
+ * zkn moving this to the serialization module so things compile (use headers
+ * people!)
  */
-typedef struct {
-	void *km; //this is a kalloc handler? 
-	const gfa_t *g;
-	const gfa_edseq_t *es; //A gfa_edseq_t is a sequence. literally char*+len
-	const char *qseq; //query sequence
-	int32_t n_seg, n_llc, m_llc, n_a; //presumably lc is linear chain, so perahps 
-                                    //this relates to the two chains we pass as
-                                    //other arguments to the kernel
-	mg_llchain_t *llc; //offset, count, vertex, score, edit distance
-} bridge_aux_t;
+//typedef struct {
+//	void *km; //this is a kalloc handler? 
+//	const gfa_t *g;
+//	const gfa_edseq_t *es; //A gfa_edseq_t is a sequence. literally char*+len
+//	const char *qseq; //query sequence
+//	int32_t n_seg, n_llc, m_llc, n_a; //presumably lc is linear chain, so perahps 
+//                                    //this relates to the two chains we pass as
+//                                    //other arguments to the kernel
+//	mg_llchain_t *llc; //offset, count, vertex, score, edit distance. Note this is
+//                     //probably an array, therefore I think collectively these
+//                     //llc form a complete path through the graph
+//} bridge_aux_t;
 
 static inline void copy_lchain(mg_llchain_t *q, const mg_lchain_t *p, int32_t *n_a, mg128_t *a_new, const mg128_t *a_old, int32_t ed)
 {
@@ -357,16 +364,36 @@ static int32_t bridge_shortk(bridge_aux_t *aux, const mg_lchain_t *l0, const mg_
  * suppose they use an approximate mapping to get the nodes, and then they apply
  * the graph linkage. Maybe this lets you avoid base level alignment within node
  * if it doesn't have a useful connection anyways
- * aux has the graph
- * ed is perhaps edit distance? As in the score in the dp matrix? It is always
- *    passed as -1
- * gdp_max_ed perhaps a banding parameter for the edit distance at which to
- *    drop? It seems to be defaulted to 10000 in options.c. Perhaps it is
- *    overwritten somewhere else
- * kmer_size is derived from the mysterious variable, a. Just copy it as you go.
+ * aux has the graph, and it somehow contains the result of the computation
+ *   void *km; construct (and share?)
+ *             Try generating with void* km = km_init() and then destroy
+ *             cite: map-algo.c:18
+ *             ggen.c:63 
+ *             gmap.c:31 
+ *             gmap.c:34
+ *             If you are smart you should be able to initialize one for each
+ *             for loop and then recycle it with some kind of free/reset
+ *   const gfa_t *g; construct
+ **  const gfa_edseq_t *es; I am reasonably sure that this can be statically 
+                            constructed from the graph. There is only one 
+                            instance of regex expr "->es.*=". This assigns es to
+                            gfa_edseq_init(gfa_t* g). I recommend he use it 
+ *   const char *qseq; store
+ **  int32_t n_seg; store?
+ **  int32_t n_llc; store/output
+ **  int32_t m_llc; store/output
+ **  int32_t n_a; store?
+ *   mg_llchain_t *llc; probably output
+ * ed gen and maybe output. it is always passed as -1.
+ * gdp_max_ed gen default. IIt seems to be 10000 during the run set in options.c
+ * kmer_size gen is derived from the mysterious variable, a, but when we look at the
+ *    output it seems to just be the kmer size as specififed from the
+ *    command line default appears to be 19, although the docs say 17
+ * lchains are the two anchors. They are const, so params only.
 */
 static int32_t bridge_gwfa(bridge_aux_t *aux, int32_t kmer_size, int32_t gdp_max_ed, const mg_lchain_t *l0, const mg_lchain_t *l1, int32_t *ed)
 {
+  printf("size of km %d\n", sizeof(*(aux->km)));
   //start and end verticies
 	uint32_t v0 = l0->v, v1 = l1->v;
   //qe is query end. qs is query start. end0 and end1 appear to be reference
@@ -383,6 +410,43 @@ static int32_t bridge_gwfa(bridge_aux_t *aux, int32_t kmer_size, int32_t gdp_max
 	gfa_edopt_init(&opt);
 	opt.traceback = 1, opt.max_chk = 1000, opt.bw_dyn = 1000, opt.max_lag = gdp_max_ed/2;
 	opt.i_term = 500000000LL;
+#ifdef WRITE_KERNEL_INS_AND_OUTS
+  storeV0(v0);
+  storeV1(v1);
+  storeEnd0(end0);
+  storeEnd1(end1);
+  storeQueryGapLength(qe-qs);
+  storeQueryGap(&aux->qseq[qs], qe-qs);
+#endif
+#ifdef LOAD_INS_FROM_DUMP_TO_LOAD
+  static int firstCall = 1; //boolean
+  if (firstCall){
+    initLoad();
+    firstCall=0;
+  }
+
+  uint32_t queryGapLen = loadQueryGapLen();
+  gfa_t* g = loadGfa();
+  void* km = loadKm();
+	z = gfa_ed_init(
+      km,//aux->km, 
+      &opt, 
+      g,//aux->g, 
+      loadEsT(g),//aux->es, 
+      queryGapLen,//qe - qs, 
+      loadQueryGap(qs, queryGapLen),//&aux->qseq[qs], 
+      loadV0(),//v0, 
+      loadEnd0()//end0
+      );
+	gfa_ed_step(
+      z, 
+      loadV1(),//v1, 
+      loadEnd1(),//end1, 
+      10000,//gdp_max_ed, 
+      &r
+      );
+	gfa_ed_destroy(z);
+#else
   //This thing basically assigns all those classes to a void* pointer
 	z = gfa_ed_init(aux->km, &opt, aux->g, aux->es, qe - qs, &aux->qseq[qs], v0, end0);
   //I think this is where gfwa is actually run. The last important piece of this
@@ -397,10 +461,19 @@ static int32_t bridge_gwfa(bridge_aux_t *aux, int32_t kmer_size, int32_t gdp_max
   //Actually maybe it is ed
 	gfa_ed_step(z, v1, end1, gdp_max_ed, &r);
 	gfa_ed_destroy(z);
+#endif
+  
+#ifdef WRITE_KERNEL_INS_AND_OUTS
+  storeResult(&r);
+#endif
+#ifndef LOAD_INS_FROM_DUMP_TO_LOAD
 	//fprintf(stdout, "qs=%d,qe=%d,v0=%c%s:%d:%d,v1=%c%s:%d,s=%d,nv=%d\n", qs, qe, "><"[v0&1], aux->g->seg[v0>>1].name, end0, aux->g->seg[v0>>1].len - end0 - 1, "><"[v1&1], aux->g->seg[v1>>1].name, end1, r.s, r.nv);
 	if (r.s < 0) return 0;
 
-  //Don't know what this part is about
+  //This is it! The return value of gfa_ed_step is primarilly r, (perhaps
+  //entirely) r is then used here to load the path into the gwfa llc list thing.
+  //att the end I believe the llc thing will have the entire path including
+  //linear chains.
 	for (j = 1; j < r.nv - 1; ++j) {
 		mg_llchain_t *q;
 		if (aux->n_llc == aux->m_llc) KEXPAND(aux->km, aux->llc, aux->m_llc);
@@ -410,8 +483,12 @@ static int32_t bridge_gwfa(bridge_aux_t *aux, int32_t kmer_size, int32_t gdp_max
 		q->ed = -1;
 	}
 	kfree(aux->km, r.v);
-	*ed = r.s; //actually, this could also be the output
+	*ed = r.s; //s must be score not sequence cause ed is 1 int it seems
 	return 1;
+#else
+  kfree(km, r.v);
+  return 1;
+#endif
 }
 
 //zkn presumably l0 is a node with a linear chain, and l1 is another node
@@ -498,7 +575,7 @@ mg_gchains_t *mg_gchain_gen(void *km_dst, void *km, const gfa_t *g, const gfa_ed
 	KMALLOC(km_dst, gc->a, gc->n_a);
 
 	// core loop
-	memset(&aux, 0, sizeof(aux));
+	memset(&aux, 0, sizeof(aux)); //zkn aux initialized to null here
 	aux.km = km, aux.g = g, aux.es = es, aux.n_seg = n_seg, aux.qseq = qseq;
 	kmer_size = a[0].y>>32&0xff;
 	for (i = k = 0, st = 0, aux.n_a = 0; i < n_u; ++i) {

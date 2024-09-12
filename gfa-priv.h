@@ -86,7 +86,7 @@ typedef struct {
 	uint32_t end_v; //why is only this one uint?
 	int32_t end_off; //end offset
 	int32_t wlen; // length of walk
-	int32_t n_end;
+	int32_t n_end; //node end? pure speculation
 	int32_t nv; //length of the path
 	int64_t n_iter;
 	int32_t *v; //nodes on the path

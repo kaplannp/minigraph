@@ -6,6 +6,8 @@
 #include "sys.h"
 #include "ketopt.h"
 
+#include "serialization.h"
+
 #ifdef __linux__
 #include <sys/resource.h>
 #include <sys/time.h>
@@ -297,5 +299,6 @@ int main(int argc, char *argv[])
 			fprintf(stderr, " %s", argv[i]);
 		fprintf(stderr, "\n[M::%s] Real time: %.3f sec; CPU: %.3f sec; Peak RSS: %.3f GB\n", __func__, realtime() - mg_realtime0, cputime(), peakrss() / 1024.0 / 1024.0 / 1024.0);
 	}
+  flushKernelDataBuffs();
 	return !!ret;
 }

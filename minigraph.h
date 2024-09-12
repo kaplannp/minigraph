@@ -100,12 +100,14 @@ typedef struct {
 typedef struct {
 	int32_t off, cnt:31, inner_pre:1;
 	uint32_t v;
-	int32_t rs, re, qs, qe;
+	int32_t rs, re, qs, qe; //zkn reference start/end query start/end
 	int32_t score, dist_pre;
 	uint32_t hash_pre;
 } mg_lchain_t;
 
-typedef struct {
+typedef struct { //zkn the biggest difference between this and the lchain is
+                 //that this llchain does not have base level alignment features
+                 //Also these "pre" variables, but I dunno what they are
 	int32_t off, cnt;
 	uint32_t v;
 	int32_t score;
