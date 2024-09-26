@@ -49,7 +49,7 @@ void storeResult(gfa_edrst_t* r){
   resultBuff << r->wlen << " ";
 
   resultBuff << "{ ";
-  std::cerr << r->nv << std::endl;
+  //std::cerr << r->nv << std::endl;
   for(int i = 0; i < r->nv; i++){
     resultBuff << r->v[i] << " ";
   }

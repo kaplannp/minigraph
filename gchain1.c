@@ -393,7 +393,7 @@ static int32_t bridge_shortk(bridge_aux_t *aux, const mg_lchain_t *l0, const mg_
 */
 static int32_t bridge_gwfa(bridge_aux_t *aux, int32_t kmer_size, int32_t gdp_max_ed, const mg_lchain_t *l0, const mg_lchain_t *l1, int32_t *ed)
 {
-  printf("size of km %d\n", sizeof(*(aux->km)));
+  //printf("size of km %d\n", sizeof(*(aux->km)));
   //start and end verticies
 	uint32_t v0 = l0->v, v1 = l1->v;
   //qe is query end. qs is query start. end0 and end1 appear to be reference
