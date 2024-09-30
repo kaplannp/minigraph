@@ -4,6 +4,7 @@
 #include "ksort.h" // for radix sort
 #include "khashl.h" // for kh_hash_uint32()
 #include "gfa-priv.h"
+#include <time.h>
 
 typedef struct {
 	uint32_t srt;
@@ -362,7 +363,12 @@ static int32_t bridge_gwfa(bridge_aux_t *aux, int32_t kmer_size, int32_t gdp_max
 	opt.traceback = 1, opt.max_chk = 1000, opt.bw_dyn = 1000, opt.max_lag = gdp_max_ed/2;
 	opt.i_term = 500000000LL;
 	z = gfa_ed_init(aux->km, &opt, aux->g, aux->es, qe - qs, &aux->qseq[qs], v0, end0);
+  //zkn this is the only change i make in the whole thing
+  clock_t startT = clock();
 	gfa_ed_step(z, v1, end1, gdp_max_ed, &r);
+  clock_t endT = clock();
+  clock_t elapsed = endT - startT;
+  fprintf(stderr, "(v0, end0) = (%d, %d)\n(v1, end1) = (%d, %d)\nqueryGapLen = %d\ntime = %f\n", v0, end0, v1, end1, qe-qs, (double)elapsed/CLOCKS_PER_SEC);
 	gfa_ed_destroy(z);
 	//fprintf(stdout, "qs=%d,qe=%d,v0=%c%s:%d:%d,v1=%c%s:%d,s=%d,nv=%d\n", qs, qe, "><"[v0&1], aux->g->seg[v0>>1].name, end0, aux->g->seg[v0>>1].len - end0 - 1, "><"[v1&1], aux->g->seg[v1>>1].name, end1, r.s, r.nv);
 	if (r.s < 0) return 0;
