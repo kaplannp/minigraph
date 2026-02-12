@@ -10,6 +10,12 @@
 
 int gfa_ed_dbg = 0;
 
+static FILE *gwf_ed_stats_fp(void) {
+	static FILE *fp;
+	if (!fp) fp = fopen("gwf-ed-stats.log", "a");
+	return fp;
+}
+
 /***************
  * Preparation *
  ***************/
@@ -418,6 +424,13 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 	kdq_t(gwf_diag_t) *A; //A is the queue containing the verticies to look at!
 	gwf_diag_v B = {0,0,0};
 	gwf_diag_t *b;
+	FILE *stats_fp = gwf_ed_stats_fp();
+
+	if (stats_fp) {
+		fprintf(stats_fp, "SCORE: %d\n", s);
+		fprintf(stats_fp, "n: %d\n", n);
+		fflush(stats_fp);
+	}
 
 	r->end_v = (uint32_t)-1;
 	r->end_off = *end_tb = -1;
@@ -435,6 +448,10 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 	for (x = 0, i = 1; i <= n; ++i) {
 		if (i == n || a[i].vd != a[i-1].vd + 1) {
 			gwf_ed_extend_batch(buf->km, g, es, ql, q, i - x, &a[x], &B, A, &buf->tmp, r);
+			if (stats_fp) {
+				//fprintf(stats_fp, "EXTEND_BATCH: %u COUNT: %d\n", (uint32_t)(a[x].vd >> 32), i - x);
+				fflush(stats_fp);
+			}
 			x = i;
 		}
 	}
@@ -442,6 +459,7 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 #endif
 	kfree(buf->km, a); // $a is not used as it has been copied to $A
 
+	fprintf(stats_fp, "SIZE A: %d\n", (int)kdq_size(A));
 	while (kdq_size(A)) {
 		gwf_diag_t t; 
 		uint32_t v, x0;
@@ -487,6 +505,10 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 						gwf_diag_t *p;
 						p = kdq_pushp(gwf_diag_t, A);
 						p->vd = gwf_gen_vd(w, i + 1 - ol), p->k = ol, p->xo = (x0+2)<<1 | 1, p->t = tw;
+						//if (stats_fp) {
+						//	fprintf(stats_fp, "TRANSITION_A_V: %u A_SIZE: %d\n", w, (int)kdq_size(A));
+						//	fflush(stats_fp);
+						//}
 					}
 				} else if (absent) {
 					gwf_diag_push(buf->km, &B, w, i - ol,     ol, x0 + 1, 1, tw);
@@ -497,6 +519,10 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 				gwf_diag_push(buf->km, &B, v, d+1, k, x0 + 1, 1, t.t);
 		} else if (v1 == (uint32_t)-1 || (v == v1 && k == off1)) { // i + 1 == ql
 			r->end_v = v, r->end_off = k, r->wlen = x0 - i - 1, *end_tb = t.t, *n_a_ = 0;
+			if (stats_fp) {
+				fprintf(stats_fp, "TARGET_REACHED: %u\n", v);
+				fflush(stats_fp);
+			}
 			kdq_destroy(gwf_diag_t, A);
 			kfree(buf->km, B.a);
 			return 0;
@@ -515,9 +541,24 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 	kdq_destroy(gwf_diag_t, A);
 	*n_a_ = n = B.n, b = B.a;
 
+	if (stats_fp) {
+		fprintf(stats_fp, "N_A_NEXT: %d\n", n);
+		fflush(stats_fp);
+	}
+
 	if (do_dedup) *n_a_ = n = gwf_dedup(buf, n, b);
 	if (opt->max_lag > 0 && n > opt->max_chk && ((s+1)&0xf) == 0)
 		*n_a_ = n = gwf_prune(n, b, opt->max_lag, opt->bw_dyn);
+	if (stats_fp) {
+		int64_t n_inactive = 0;
+		size_t ii;
+		for (ii = 0; ii < buf->intv.n; ++ii)
+			n_inactive += buf->intv.a[ii].vd1 - buf->intv.a[ii].vd0;
+		fprintf(stats_fp, "N_INACTIVE: %lld\n", (long long)n_inactive);
+		fprintf(stats_fp, "INTV_BYTES: %lld\n",
+			(long long)(buf->intv.n * sizeof(gwf_intv_t)));
+		fflush(stats_fp);
+	}
 	return b;
 }
 
@@ -590,9 +631,11 @@ void *gfa_ed_init(void *km, const gfa_edopt_t *opt, const gfa_t *g, const gfa_ed
  */
 void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_t *r)
 {
+	FILE *stats_fp = gwf_ed_stats_fp();
 	gfa_edbuf_t *z = (gfa_edbuf_t*)z_;
 	const gfa_edopt_t *opt = z->opt;
 	if (s_term < 0 && z->opt->s_term >= 0) s_term = z->opt->s_term;
+	s_term = 3000;
 	r->n_end = 0, r->n_iter = 0;
   //This for loop consists of the extend funciton, and a bunch of termination
   //condition behaviour
@@ -616,6 +659,80 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 	if (opt->traceback && r->end_off >= 0)
 		gwf_traceback(&z->buf, r->end_v, z->end_tb, r);
 	r->s = r->end_v != (uint32_t)-1? z->s : -1;
+
+	// Print subgraph statistics
+	if (stats_fp) {
+		gwf_set64_t *hv, *hs;
+		khint_t k;
+		int absent;
+		int32_t n_vtx = 0, n_seg = 0, n_edges = 0;
+		int64_t bytes_full = 0, bytes_ess = 0, bytes_comp = 0;
+		int64_t idx_arc_bytes = 0;
+
+		// Extract unique vertices from buf->ha
+		hv = gwf_set64_init2(z->buf.km);
+		for (k = 0; k < kh_end(z->buf.ha); ++k) {
+			if (kh_exist(z->buf.ha, k)) {
+				uint32_t v = z->buf.ha->keys[k] >> 32;
+				gwf_set64_put(hv, (uint64_t)v, &absent);
+			}
+		}
+
+		// Build unique segment set from vertices
+		hs = gwf_set64_init2(z->buf.km);
+		for (k = 0; k < kh_end(hv); ++k) {
+			if (kh_exist(hv, k)) {
+				uint32_t v = (uint32_t)hv->keys[k];
+				gwf_set64_put(hs, (uint64_t)(v >> 1), &absent);
+			}
+		}
+
+		fprintf(stats_fp, "SUBGRAPH_STATS:\n");
+
+		// Per-vertex costs: index + arcs
+		for (k = 0; k < kh_end(hv); ++k) {
+			if (kh_exist(hv, k)) {
+				uint32_t v = (uint32_t)hv->keys[k];
+				int32_t nv = gfa_arc_n(z->g, v);
+				n_vtx++;
+				n_edges += nv;
+				idx_arc_bytes += sizeof(uint64_t)
+					+ (int64_t)nv * sizeof(gfa_arc_t);
+				fprintf(stats_fp, "  NODE: %u LENGTH_BP: %d\n",
+					v, z->es[v].len);
+			}
+		}
+
+		// Per-segment costs: struct + sequence + name
+		for (k = 0; k < kh_end(hs); ++k) {
+			if (kh_exist(hs, k)) {
+				uint32_t s = (uint32_t)hs->keys[k];
+				int32_t slen = z->g->seg[s].len;
+				n_seg++;
+				bytes_full += sizeof(gfa_seg_t) + slen
+					+ strlen(z->g->seg[s].name) + 1;
+				bytes_ess += sizeof(int32_t) + slen;
+				bytes_comp += sizeof(int32_t) + (slen + 3) / 4;
+			}
+		}
+		bytes_full += idx_arc_bytes;
+		bytes_ess += idx_arc_bytes;
+		bytes_comp += idx_arc_bytes;
+
+		fprintf(stats_fp, "  TOTAL_SEGMENTS: %d\n", n_seg);
+		fprintf(stats_fp, "  TOTAL_VERTICES: %d\n", n_vtx);
+		fprintf(stats_fp, "  TOTAL_EDGES: %d\n", n_edges);
+		fprintf(stats_fp, "  BYTES_FULL: %lld\n",
+			(long long)bytes_full);
+		fprintf(stats_fp, "  BYTES_ESSENTIAL: %lld\n",
+			(long long)bytes_ess);
+		fprintf(stats_fp, "  BYTES_COMPRESSED: %lld\n",
+			(long long)bytes_comp);
+		fflush(stats_fp);
+
+		gwf_set64_destroy(hs);
+		gwf_set64_destroy(hv);
+	}
 }
 
 void gfa_ed_destroy(void *z_)
