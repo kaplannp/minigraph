@@ -820,6 +820,19 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 	if (s_term < 0 && z->opt->s_term >= 0) s_term = z->opt->s_term;
 	s_term = 3000;
 	r->n_end = 0, r->n_iter = 0;
+
+	// BFS reachable subgraph — computed before the wavefront
+	// loop so we can assert the wavefront is a subset.
+	gwf_set64_t *bfs_set = NULL;
+	clock_t clk0 = 0, clk1 = 0;
+	if (stats_fp && v1 != (uint32_t)-1) {
+		clk0 = clock();
+		bfs_set = gwf_set64_init2(z->buf.km);
+		gwf_bfs_reachable(z->buf.km, z->g, z->es,
+			z->v0, v1, z->ql + s_term, bfs_set);
+		clk1 = clock();
+	}
+
   //This for loop consists of the extend funciton, and a bunch of termination
   //condition behaviour
 	while (z->n_a > 0) {
@@ -858,6 +871,18 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 			if (kh_exist(z->buf.ha, k)) {
 				uint32_t v = z->buf.ha->keys[k] >> 32;
 				gwf_set64_put(hv, (uint64_t)v, &absent);
+			}
+		}
+
+		// Assert: every wavefront vertex is BFS-reachable
+		if (bfs_set) {
+			for (k = 0; k < kh_end(hv); ++k) {
+				if (kh_exist(hv, k)) {
+					uint32_t v = (uint32_t)hv->keys[k];
+					khint_t bk = gwf_set64_get(
+						bfs_set, (uint64_t)v);
+					assert(bk < kh_end(bfs_set));
+				}
 			}
 		}
 
@@ -913,78 +938,53 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 		gwf_set64_destroy(hv);
 
 		/*
-		 * BFS subgraph measurement.
+		 * BFS subgraph stats.
 		 *
-		 * Find all vertices on any path from v0 (source) to v1
-		 * (sink) with total sequence length <= ql (query length).
-		 * Then compute the compressed (2-bit encoded) graph size
-		 * of that subgraph.
-		 *
-		 * Skip when v1 == (uint32_t)-1, which means no specific
-		 * target was given (e.g. gfa_edit_dist() calls).
+		 * bfs_set was built before the while loop. Here we
+		 * just compute and print stats from it.
 		 */
-		if (v1 != (uint32_t)-1) {
-			clock_t clk0, clk1;
+		if (bfs_set) {
 			double bfs_ms;
-			gwf_set64_t *bfs_set, *bfs_seg;
+			gwf_set64_t *bfs_seg;
 			int32_t bfs_nv = 0, bfs_ns = 0, bfs_ne = 0;
 			int64_t bfs_comp = 0, bfs_idx_arc = 0;
 			int bfs_absent;
 
-			// Time the BFS computation
-			clk0 = clock();
-			// bfs_set will hold the set of vertex IDs on valid
-			// paths. Uses gwf_set64_t (bare KHASHL_INIT), so
-			// keys are raw uint64_t accessed via ->keys[k].
-			bfs_set = gwf_set64_init2(z->buf.km);
-			gwf_bfs_reachable(z->buf.km, z->g, z->es,
-				z->v0, v1, z->ql + s_term, bfs_set);
-			clk1 = clock();
 			bfs_ms = (double)(clk1 - clk0)
 				/ CLOCKS_PER_SEC * 1000.0;
 
 			/*
-			 * Compute graph size stats from the BFS result.
-			 *
 			 * Vertices are oriented (vertex_id = seg_id<<1|ori),
 			 * so we deduplicate into segments (v>>1) to avoid
 			 * counting both orientations of the same sequence.
 			 *
 			 * Compressed size =
 			 *   per segment: sizeof(int32_t) + ceil(len/4)
-			 *     (int32_t for storing length, ceil(len/4) for
-			 *      2-bit encoded sequence: 4 bases per byte)
 			 *   per vertex: sizeof(uint64_t) for idx entry
-			 *     + n_arcs * sizeof(gfa_arc_t) for edge storage
+			 *     + n_arcs * sizeof(gfa_arc_t)
 			 */
 			bfs_seg = gwf_set64_init2(z->buf.km);
-			// First pass: per-vertex costs (index + arcs)
 			for (k = 0; k < kh_end(bfs_set); ++k) {
 				if (kh_exist(bfs_set, k)) {
 					uint32_t v = (uint32_t)bfs_set->keys[k];
 					int32_t nv = gfa_arc_n(z->g, v);
 					bfs_nv++;
 					bfs_ne += nv;
-					// idx entry (uint64_t) + arc array
 					bfs_idx_arc += sizeof(uint64_t)
 						+ (int64_t)nv * sizeof(gfa_arc_t);
-					// Deduplicate: v>>1 gives segment ID
 					gwf_set64_put(bfs_seg,
 						(uint64_t)(v >> 1), &bfs_absent);
 				}
 			}
-			// Second pass: per-segment costs (sequence data)
 			for (k = 0; k < kh_end(bfs_seg); ++k) {
 				if (kh_exist(bfs_seg, k)) {
 					uint32_t s = (uint32_t)bfs_seg->keys[k];
 					int32_t slen = z->g->seg[s].len;
 					bfs_ns++;
-					// 2-bit encoding: 4 bases per byte
 					bfs_comp += sizeof(int32_t)
 						+ (slen + 3) / 4;
 				}
 			}
-			// Add topology overhead (shared across all metrics)
 			bfs_comp += bfs_idx_arc;
 
 			fprintf(stats_fp, "BFS_TIME_MS: %.3f\n", bfs_ms);
@@ -996,8 +996,9 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 			fflush(stats_fp);
 
 			gwf_set64_destroy(bfs_seg);
-			gwf_set64_destroy(bfs_set);
 		}
+		if (bfs_set)
+			gwf_set64_destroy(bfs_set);
 	}
 }
 
