@@ -636,82 +636,61 @@ static void gwf_ed_print_intv(size_t n, gwf_intv_t *a) // for debugging only
  */
 static void gwf_bfs_reachable(void *km, const gfa_t *g,
 	const gfa_edseq_t *es, uint32_t v0, uint32_t v1,
+	int32_t off0, int32_t off1,
 	int32_t budget, gwf_set64_t *result)
 {
-	gwf_map64_t *fwd, *bwd;      // distance maps: vertex -> min dist
+	gwf_map64_t *fwd, *bwd;
 	typedef kvec_t(uint32_t) uint32_v;
-	uint32_v queue = {0, 0, 0};  // BFS queue (reused for both passes)
-	int32_t head, j;              // head = queue read pointer
-	khint_t k;                    // hash table bucket index
-	int absent;                   // set by put: 1 if key was new
+	uint32_v queue = {0, 0, 0};
+	int32_t head, j;
+	khint_t k;
+	int absent;
 
 	/*
-	 * PASS 1: Forward BFS from v0
+	 * PASS 1: Forward BFS from v0.
 	 *
-	 * fwd maps vertex_id (uint64_t) -> min distance (int32_t).
-	 * Distance = sum of sequence lengths along the path,
-	 * including the source vertex v0.
-	 *
-	 * We use gwf_map64_t (KHASHL_MAP_INIT with uint64_t keys
-	 * and int32_t values). Access pattern:
-	 *   gwf_map64_put(h, key, &absent) -> bucket index
-	 *   gwf_map64_get(h, key) -> bucket index (kh_end if missing)
-	 *   kh_val(h, bucket) -> the int32_t value
+	 * Seed v0 with its effective length (es[v0].len - off0)
+	 * since the wavefront starts at offset off0 inside v0.
+	 * Don't prune v1: its full-segment fwd distance can
+	 * exceed budget, but the intersection subtracts the
+	 * excess via bwd[v1] = off1 + 1 (< es[v1].len).
 	 */
 	fwd = gwf_map64_init2(km);
-	// Seed: distance to v0 = its own sequence length
 	k = gwf_map64_put(fwd, (uint64_t)v0, &absent);
-	kh_val(fwd, k) = es[v0].len;
+	kh_val(fwd, k) = es[v0].len - off0;
 	kv_push(uint32_t, km, queue, v0);
 
-	// Process queue. Note: queue.n grows as we enqueue new
-	// vertices, so this loop processes all reachable vertices.
 	for (head = 0; head < (int32_t)queue.n; ++head) {
 		uint32_t v = queue.a[head];
-		// Look up current min distance to v
 		khint_t kv = gwf_map64_get(fwd, (uint64_t)v);
 		int32_t dv = kh_val(fwd, kv);
-		// Get outgoing arcs from v: gfa_arc_a returns the arc
-		// array, gfa_arc_n returns the count
 		int32_t nv = gfa_arc_n(g, v);
 		const gfa_arc_t *av = gfa_arc_a(g, v);
 		for (j = 0; j < nv; ++j) {
-			uint32_t w = av[j].w;       // neighbor vertex
-			// Candidate distance to w = dist to v + w's length
+			uint32_t w = av[j].w;
 			int32_t dw = dv + es[w].len;
 			khint_t kw;
-			if (dw > budget) continue;  // over budget, prune
-			// Insert or find w in the distance map.
-			// If absent=1, w is new. If absent=0, w exists.
+			// Don't prune v1: it may exceed budget in
+			// fwd but the intersection corrects for it.
+			if (dw > budget && w != v1) continue;
 			kw = gwf_map64_put(fwd, (uint64_t)w, &absent);
-			// Update if this is a new vertex or we found a
-			// shorter path than previously recorded.
 			if (absent || kh_val(fwd, kw) > dw) {
 				kh_val(fwd, kw) = dw;
-				// Re-enqueue for further exploration with
-				// the shorter distance (relaxation).
 				kv_push(uint32_t, km, queue, w);
 			}
 		}
 	}
 
 	/*
-	 * PASS 2: Backward BFS from v1 (reverse edges)
+	 * PASS 2: Backward BFS from v1 (reverse edges).
 	 *
-	 * bwd maps vertex_id -> min distance from that vertex to v1.
-	 *
-	 * To traverse incoming edges (predecessors), we use the
-	 * complement arc convention from gfa.h:
-	 *   If arc (a -> v) exists, its complement (v^1 -> a^1) exists.
-	 * So: outgoing arcs from v^1 have targets {w0, w1, ...},
-	 *   and the actual predecessors of v are {w0^1, w1^1, ...}.
-	 * (^1 flips the orientation bit: v^1 = v XOR 1)
+	 * Seed v1 with off1 + 1 since the wavefront ends at
+	 * offset off1 inside v1. Don't prune v0: same reason
+	 * as above (the intersection corrects for it).
 	 */
 	bwd = gwf_map64_init2(km);
-	// Seed: distance from v1 to itself = its own sequence length
 	k = gwf_map64_put(bwd, (uint64_t)v1, &absent);
-	kh_val(bwd, k) = es[v1].len;
-	// Reuse the queue array, reset length
+	kh_val(bwd, k) = off1 + 1;
 	queue.n = 0;
 	kv_push(uint32_t, km, queue, v1);
 
@@ -719,16 +698,14 @@ static void gwf_bfs_reachable(void *km, const gfa_t *g,
 		uint32_t v = queue.a[head];
 		khint_t kv = gwf_map64_get(bwd, (uint64_t)v);
 		int32_t dv = kh_val(bwd, kv);
-		// Get predecessors of v via complement arcs:
-		// outgoing arcs from v^1, each target w -> pred = w^1
 		int32_t nv = gfa_arc_n(g, v ^ 1);
 		const gfa_arc_t *av = gfa_arc_a(g, v ^ 1);
 		for (j = 0; j < nv; ++j) {
-			uint32_t pred = av[j].w ^ 1; // actual predecessor
-			// Distance from pred to v1 = dist(v->v1) + pred's len
+			uint32_t pred = av[j].w ^ 1;
 			int32_t dp = dv + es[pred].len;
 			khint_t kp;
-			if (dp > budget) continue;  // over budget, prune
+			// Don't prune v0: same logic as v1 above.
+			if (dp > budget && pred != v0) continue;
 			kp = gwf_map64_put(bwd, (uint64_t)pred, &absent);
 			if (absent || kh_val(bwd, kp) > dp) {
 				kh_val(bwd, kp) = dp;
@@ -738,29 +715,19 @@ static void gwf_bfs_reachable(void *km, const gfa_t *g,
 	}
 
 	/*
-	 * INTERSECTION: find vertices on valid paths.
-	 *
-	 * A vertex v is on some path v0->...->v->...->v1 with total
-	 * sequence length <= budget iff:
+	 * INTERSECTION: vertex v is on a valid v0->v1 path iff
 	 *   fwd[v] + bwd[v] - es[v].len <= budget
 	 *
-	 * We subtract es[v].len because v's sequence length is counted
-	 * once in fwd[v] (as the path ...->v) and once in bwd[v]
-	 * (as the path v->...), so it would be double-counted.
-	 *
-	 * We iterate the forward map and check each vertex against
-	 * the backward map. kh_end(bwd) is the sentinel for "not found".
+	 * With adjusted seeds this gives the true path length
+	 * from off0 in v0 to off1 in v1 through v.
 	 */
 	for (k = 0; k < kh_end(fwd); ++k) {
 		if (kh_exist(fwd, k)) {
-			// kh_key works here because gwf_map64_t uses
-			// KHASHL_MAP_INIT (buckets have .key/.val fields),
-			// unlike gwf_set64_t which uses bare KHASHL_INIT.
 			uint32_t v = (uint32_t)kh_key(fwd, k);
-			int32_t df = kh_val(fwd, k);    // min dist v0->v
+			int32_t df = kh_val(fwd, k);
 			khint_t kb = gwf_map64_get(bwd, (uint64_t)v);
-			if (kb < kh_end(bwd)) {          // v reachable from v1
-				int32_t db = kh_val(bwd, kb); // min dist v->v1
+			if (kb < kh_end(bwd)) {
+				int32_t db = kh_val(bwd, kb);
 				if (df + db - es[v].len <= budget)
 					gwf_set64_put(result, (uint64_t)v,
 						&absent);
@@ -768,7 +735,6 @@ static void gwf_bfs_reachable(void *km, const gfa_t *g,
 		}
 	}
 
-	// Cleanup: free queue array and both hash maps
 	kfree(km, queue.a);
 	gwf_map64_destroy(fwd);
 	gwf_map64_destroy(bwd);
@@ -785,6 +751,7 @@ typedef struct {
 	gwf_diag_t *a; //oh, is that what a's are? diagonals?
 	int32_t end_tb;
 	uint32_t v0;
+	int32_t off0;
 } gfa_edbuf_t;
 
 void *gfa_ed_init(void *km, const gfa_edopt_t *opt, const gfa_t *g, const gfa_edseq_t *es, int32_t ql, const char *q, uint32_t v0, int32_t off0)
@@ -800,6 +767,7 @@ void *gfa_ed_init(void *km, const gfa_edopt_t *opt, const gfa_t *g, const gfa_ed
 	kv_resize(gwf_trace_t, km, z->buf.t, 16);
 	KCALLOC(km, z->a, 1);
 	z->v0 = v0;
+	z->off0 = off0;
 	z->a[0].vd = gwf_gen_vd(v0, -off0), z->a[0].k = off0 - 1, z->a[0].xo = 0;
 	if (z->opt->traceback) z->a[0].t = gwf_trace_push(km, &z->buf.t, -1, -1, z->buf.ht);
 	z->n_a = 1;
@@ -829,7 +797,8 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 		clk0 = clock();
 		bfs_set = gwf_set64_init2(z->buf.km);
 		gwf_bfs_reachable(z->buf.km, z->g, z->es,
-			z->v0, v1, z->ql + s_term, bfs_set);
+			z->v0, v1, z->off0, off1,
+			z->ql + s_term, bfs_set);
 		clk1 = clock();
 	}
 
@@ -874,15 +843,13 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 			}
 		}
 
-		// Assert: every wavefront vertex is BFS-reachable
-		if (bfs_set) {
-			for (k = 0; k < kh_end(hv); ++k) {
-				if (kh_exist(hv, k)) {
-					uint32_t v = (uint32_t)hv->keys[k];
-					khint_t bk = gwf_set64_get(
-						bfs_set, (uint64_t)v);
-					assert(bk < kh_end(bfs_set));
-				}
+		// Assert: every traceback vertex is BFS-reachable
+		if (bfs_set && r->nv > 0) {
+			int32_t ti;
+			for (ti = 0; ti < r->nv; ++ti) {
+				khint_t bk = gwf_set64_get(
+					bfs_set, (uint64_t)(uint32_t)r->v[ti]);
+				assert(bk < kh_end(bfs_set));
 			}
 		}
 
