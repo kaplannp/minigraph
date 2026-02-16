@@ -1,7 +1,6 @@
 #include <assert.h>
 #include <string.h>
 #include <stdio.h>
-#include <time.h>
 #include "gfa-priv.h"
 #include "kalloc.h"
 #include "ksort.h"
@@ -11,9 +10,9 @@
 
 int gfa_ed_dbg = 0;
 
-static FILE *gwf_ed_stats_fp(void) {
+static FILE *gwf_scores_fp(void) {
 	static FILE *fp;
-	if (!fp) fp = fopen("gwf-ed-stats.log", "a");
+	if (!fp) fp = fopen("scores.txt", "a");
 	return fp;
 }
 
@@ -78,6 +77,14 @@ typedef kvec_t(gwf_intv_t) gwf_intv_v;
 
 #define intvd_key(x) ((x).vd0)
 KRADIX_SORT_INIT(gwf_intv, gwf_intv_t, intvd_key, 8)
+
+#define subgfa_arc_key(a) ((uint64_t)(a).v << 32)
+KRADIX_SORT_INIT(subgfa_arc, subgfa_arc_t, subgfa_arc_key, 8)
+
+#define subgfa_arc_n(s, v) \
+	((uint32_t)(s)->idx[(v)])
+#define subgfa_arc_a(s, v) \
+	(&(s)->arc[(s)->idx[(v)]>>32])
 
 static int gwf_intv_is_sorted(int32_t n_a, const gwf_intv_t *a)
 {
@@ -425,13 +432,6 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 	kdq_t(gwf_diag_t) *A; //A is the queue containing the verticies to look at!
 	gwf_diag_v B = {0,0,0};
 	gwf_diag_t *b;
-	FILE *stats_fp = gwf_ed_stats_fp();
-
-	if (stats_fp) {
-		fprintf(stats_fp, "SCORE: %d\n", s);
-		fprintf(stats_fp, "n: %d\n", n);
-		fflush(stats_fp);
-	}
 
 	r->end_v = (uint32_t)-1;
 	r->end_off = *end_tb = -1;
@@ -449,10 +449,6 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 	for (x = 0, i = 1; i <= n; ++i) {
 		if (i == n || a[i].vd != a[i-1].vd + 1) {
 			gwf_ed_extend_batch(buf->km, g, es, ql, q, i - x, &a[x], &B, A, &buf->tmp, r);
-			if (stats_fp) {
-				//fprintf(stats_fp, "EXTEND_BATCH: %u COUNT: %d\n", (uint32_t)(a[x].vd >> 32), i - x);
-				fflush(stats_fp);
-			}
 			x = i;
 		}
 	}
@@ -460,7 +456,6 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 #endif
 	kfree(buf->km, a); // $a is not used as it has been copied to $A
 
-	fprintf(stats_fp, "SIZE A: %d\n", (int)kdq_size(A));
 	while (kdq_size(A)) {
 		gwf_diag_t t; 
 		uint32_t v, x0;
@@ -506,10 +501,6 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 						gwf_diag_t *p;
 						p = kdq_pushp(gwf_diag_t, A);
 						p->vd = gwf_gen_vd(w, i + 1 - ol), p->k = ol, p->xo = (x0+2)<<1 | 1, p->t = tw;
-						//if (stats_fp) {
-						//	fprintf(stats_fp, "TRANSITION_A_V: %u A_SIZE: %d\n", w, (int)kdq_size(A));
-						//	fflush(stats_fp);
-						//}
 					}
 				} else if (absent) {
 					gwf_diag_push(buf->km, &B, w, i - ol,     ol, x0 + 1, 1, tw);
@@ -520,10 +511,6 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 				gwf_diag_push(buf->km, &B, v, d+1, k, x0 + 1, 1, t.t);
 		} else if (v1 == (uint32_t)-1 || (v == v1 && k == off1)) { // i + 1 == ql
 			r->end_v = v, r->end_off = k, r->wlen = x0 - i - 1, *end_tb = t.t, *n_a_ = 0;
-			if (stats_fp) {
-				fprintf(stats_fp, "TARGET_REACHED: %u\n", v);
-				fflush(stats_fp);
-			}
 			kdq_destroy(gwf_diag_t, A);
 			kfree(buf->km, B.a);
 			return 0;
@@ -542,24 +529,9 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 	kdq_destroy(gwf_diag_t, A);
 	*n_a_ = n = B.n, b = B.a;
 
-	if (stats_fp) {
-		fprintf(stats_fp, "N_A_NEXT: %d\n", n);
-		fflush(stats_fp);
-	}
-
 	if (do_dedup) *n_a_ = n = gwf_dedup(buf, n, b);
 	if (opt->max_lag > 0 && n > opt->max_chk && ((s+1)&0xf) == 0)
 		*n_a_ = n = gwf_prune(n, b, opt->max_lag, opt->bw_dyn);
-	if (stats_fp) {
-		int64_t n_inactive = 0;
-		size_t ii;
-		for (ii = 0; ii < buf->intv.n; ++ii)
-			n_inactive += buf->intv.a[ii].vd1 - buf->intv.a[ii].vd0;
-		fprintf(stats_fp, "N_INACTIVE: %lld\n", (long long)n_inactive);
-		fprintf(stats_fp, "INTV_BYTES: %lld\n",
-			(long long)(buf->intv.n * sizeof(gwf_intv_t)));
-		fflush(stats_fp);
-	}
 	return b;
 }
 
@@ -740,6 +712,171 @@ static void gwf_bfs_reachable(void *km, const gfa_t *g,
 	gwf_map64_destroy(bwd);
 }
 
+/*
+ * Build a compact subgraph from BFS-reachable vertices.
+ */
+subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
+	const gfa_edseq_t *es, uint32_t v0, uint32_t v1,
+	int32_t off0, int32_t off1, int32_t budget,
+	subgfa_vmap_t *vmap)
+{
+	void *km;
+	gwf_set64_t *vset, *seg_set;
+	subgfa_subgraph_t *sub;
+	uint32_t *segs, n_seg, i;
+	int32_t *seg_remap;
+	uint64_t n_arc, arc_idx;
+	khint_t k;
+	int absent;
+
+	// 1. BFS to get vertex hash set
+	km = km_init();
+	vset = gwf_set64_init2(km);
+	gwf_bfs_reachable(km, g, es, v0, v1, off0, off1,
+		budget, vset);
+
+	// 2. Collect unique segment IDs
+	segs = (uint32_t*)malloc(
+		kh_size(vset) * sizeof(uint32_t));
+	seg_set = gwf_set64_init2(km);
+	n_seg = 0;
+	for (k = 0; k < kh_end(vset); ++k) {
+		if (kh_exist(vset, k)) {
+			uint32_t seg = (uint32_t)vset->keys[k] >> 1;
+			gwf_set64_put(seg_set, (uint64_t)seg,
+				&absent);
+			if (absent) segs[n_seg++] = seg;
+		}
+	}
+	gwf_set64_destroy(seg_set);
+
+	// 3. Sort segment IDs (insertion sort, n_seg small)
+	for (i = 1; i < n_seg; ++i) {
+		uint32_t tmp = segs[i], j = i;
+		while (j > 0 && segs[j - 1] > tmp) {
+			segs[j] = segs[j - 1];
+			--j;
+		}
+		segs[j] = tmp;
+	}
+
+	// Build reverse mapping: old_seg -> new_seg
+	seg_remap = (int32_t*)calloc(
+		g->n_seg, sizeof(int32_t));
+	for (i = 0; i < (uint32_t)g->n_seg; ++i)
+		seg_remap[i] = -1;
+	for (i = 0; i < n_seg; ++i)
+		seg_remap[segs[i]] = (int32_t)i;
+
+	// 4. Allocate subgraph
+	sub = (subgfa_subgraph_t*)calloc(
+		1, sizeof(subgfa_subgraph_t));
+	sub->n_seg = n_seg;
+
+	// 5. Fill vmap
+	vmap->n_seg = n_seg;
+	vmap->seg_map = (uint32_t*)malloc(
+		n_seg * sizeof(uint32_t));
+	for (i = 0; i < n_seg; ++i)
+		vmap->seg_map[i] = segs[i];
+
+	// 6. Populate es[] (forward strand only)
+	sub->es = (gfa_edseq_t*)malloc(
+		n_seg * sizeof(gfa_edseq_t));
+	for (i = 0; i < n_seg; ++i) {
+		uint32_t old_s = segs[i];
+		sub->es[i].seq = es[old_s << 1].seq;
+		sub->es[i].len = es[old_s << 1].len;
+	}
+
+	// 7. Count arcs (both endpoints in vertex set)
+	n_arc = 0;
+	for (k = 0; k < kh_end(vset); ++k) {
+		if (kh_exist(vset, k)) {
+			uint32_t v = (uint32_t)vset->keys[k];
+			int32_t nv = gfa_arc_n(g, v), j;
+			const gfa_arc_t *av = gfa_arc_a(g, v);
+			for (j = 0; j < nv; ++j) {
+				khint_t kw = gwf_set64_get(
+					vset, (uint64_t)av[j].w);
+				if (kw < kh_end(vset))
+					++n_arc;
+			}
+		}
+	}
+	sub->n_arc = n_arc;
+
+	// 8. Copy arcs with remapped segment IDs
+	sub->arc = (subgfa_arc_t*)malloc(
+		n_arc * sizeof(subgfa_arc_t));
+	arc_idx = 0;
+	for (k = 0; k < kh_end(vset); ++k) {
+		if (kh_exist(vset, k)) {
+			uint32_t v = (uint32_t)vset->keys[k];
+			int32_t nv = gfa_arc_n(g, v), j;
+			const gfa_arc_t *av = gfa_arc_a(g, v);
+			for (j = 0; j < nv; ++j) {
+				khint_t kw = gwf_set64_get(
+					vset, (uint64_t)av[j].w);
+				if (kw < kh_end(vset)) {
+					sub->arc[arc_idx].v =
+						seg_remap[v >> 1];
+					sub->arc[arc_idx].w =
+						seg_remap[av[j].w >> 1];
+					sub->arc[arc_idx].ow = av[j].ow;
+					++arc_idx;
+				}
+			}
+		}
+	}
+
+	// 9. Sort arcs by source v
+	radix_sort_subgfa_arc(sub->arc, sub->arc + n_arc);
+
+	// 10. Build idx[] (size n_seg)
+	sub->idx = (uint64_t*)calloc(
+		n_seg, sizeof(uint64_t));
+	if (n_arc > 0) {
+		uint32_t cur_v = sub->arc[0].v;
+		uint64_t start = 0;
+		for (i = 1; i <= (uint32_t)n_arc; ++i) {
+			if (i == (uint32_t)n_arc
+				|| sub->arc[i].v != cur_v) {
+				sub->idx[cur_v] =
+					(start << 32) | (i - start);
+				if (i < (uint32_t)n_arc) {
+					cur_v = sub->arc[i].v;
+					start = i;
+				}
+			}
+		}
+	}
+
+	// 11. Free BFS temporaries
+	free(segs);
+	free(seg_remap);
+	gwf_set64_destroy(vset);
+	km_destroy(km);
+	return sub;
+}
+
+void subgfa_subgraph_destroy(subgfa_subgraph_t *sub)
+{
+	if (!sub) return;
+	free(sub->es);
+	free(sub->arc);
+	free(sub->idx);
+	free(sub);
+}
+
+void subgfa_vmap_destroy(subgfa_vmap_t *vmap)
+{
+	if (!vmap) return;
+	free(vmap->seg_map);
+	vmap->seg_map = NULL;
+	vmap->n_seg = 0;
+}
+
 typedef struct {
 	const gfa_t *g; //graph
 	const gfa_edseq_t *es; //edit sequence?
@@ -782,25 +919,18 @@ void *gfa_ed_init(void *km, const gfa_edopt_t *opt, const gfa_t *g, const gfa_ed
  */
 void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_t *r)
 {
-	FILE *stats_fp = gwf_ed_stats_fp();
 	gfa_edbuf_t *z = (gfa_edbuf_t*)z_;
 	const gfa_edopt_t *opt = z->opt;
 	if (s_term < 0 && z->opt->s_term >= 0) s_term = z->opt->s_term;
 	s_term = 3000;
 	r->n_end = 0, r->n_iter = 0;
 
-	// BFS reachable subgraph — computed before the wavefront
-	// loop so we can assert the wavefront is a subset.
-	gwf_set64_t *bfs_set = NULL;
-	clock_t clk0 = 0, clk1 = 0;
-	if (stats_fp && v1 != (uint32_t)-1) {
-		clk0 = clock();
-		bfs_set = gwf_set64_init2(z->buf.km);
-		gwf_bfs_reachable(z->buf.km, z->g, z->es,
+	subgfa_subgraph_t *sub = NULL;
+	subgfa_vmap_t vmap = {0};
+	if (v1 != (uint32_t)-1)
+		sub = subgfa_subgraph(z->g, z->es,
 			z->v0, v1, z->off0, off1,
-			z->ql + s_term, bfs_set);
-		clk1 = clock();
-	}
+			z->ql + s_term, &vmap);
 
   //This for loop consists of the extend funciton, and a bunch of termination
   //condition behaviour
@@ -825,147 +955,12 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 		gwf_traceback(&z->buf, r->end_v, z->end_tb, r);
 	r->s = r->end_v != (uint32_t)-1? z->s : -1;
 
-	// Print subgraph statistics
-	if (stats_fp) {
-		gwf_set64_t *hv, *hs;
-		khint_t k;
-		int absent;
-		int32_t n_vtx = 0, n_seg = 0, n_edges = 0;
-		int64_t bytes_full = 0, bytes_ess = 0, bytes_comp = 0;
-		int64_t idx_arc_bytes = 0;
+	if (sub) subgfa_subgraph_destroy(sub);
+	subgfa_vmap_destroy(&vmap);
 
-		// Extract unique vertices from buf->ha
-		hv = gwf_set64_init2(z->buf.km);
-		for (k = 0; k < kh_end(z->buf.ha); ++k) {
-			if (kh_exist(z->buf.ha, k)) {
-				uint32_t v = z->buf.ha->keys[k] >> 32;
-				gwf_set64_put(hv, (uint64_t)v, &absent);
-			}
-		}
-
-		// Assert: every traceback vertex is BFS-reachable
-		if (bfs_set && r->nv > 0) {
-			int32_t ti;
-			for (ti = 0; ti < r->nv; ++ti) {
-				khint_t bk = gwf_set64_get(
-					bfs_set, (uint64_t)(uint32_t)r->v[ti]);
-				assert(bk < kh_end(bfs_set));
-			}
-		}
-
-		// Build unique segment set from vertices
-		hs = gwf_set64_init2(z->buf.km);
-		for (k = 0; k < kh_end(hv); ++k) {
-			if (kh_exist(hv, k)) {
-				uint32_t v = (uint32_t)hv->keys[k];
-				gwf_set64_put(hs, (uint64_t)(v >> 1), &absent);
-			}
-		}
-
-		// Per-vertex costs: index + arcs
-		for (k = 0; k < kh_end(hv); ++k) {
-			if (kh_exist(hv, k)) {
-				uint32_t v = (uint32_t)hv->keys[k];
-				int32_t nv = gfa_arc_n(z->g, v);
-				n_vtx++;
-				n_edges += nv;
-				idx_arc_bytes += sizeof(uint64_t)
-					+ (int64_t)nv * sizeof(gfa_arc_t);
-			}
-		}
-
-		// Per-segment costs: struct + sequence + name
-		for (k = 0; k < kh_end(hs); ++k) {
-			if (kh_exist(hs, k)) {
-				uint32_t s = (uint32_t)hs->keys[k];
-				int32_t slen = z->g->seg[s].len;
-				n_seg++;
-				bytes_full += sizeof(gfa_seg_t) + slen
-					+ strlen(z->g->seg[s].name) + 1;
-				bytes_ess += sizeof(int32_t) + slen;
-				bytes_comp += sizeof(int32_t) + (slen + 3) / 4;
-			}
-		}
-		bytes_full += idx_arc_bytes;
-		bytes_ess += idx_arc_bytes;
-		bytes_comp += idx_arc_bytes;
-
-		fprintf(stats_fp, "TOTAL_SEGMENTS: %d\n", n_seg);
-		fprintf(stats_fp, "TOTAL_VERTICES: %d\n", n_vtx);
-		fprintf(stats_fp, "TOTAL_EDGES: %d\n", n_edges);
-		fprintf(stats_fp, "BYTES_FULL: %lld\n",
-			(long long)bytes_full);
-		fprintf(stats_fp, "BYTES_ESSENTIAL: %lld\n",
-			(long long)bytes_ess);
-		fprintf(stats_fp, "BYTES_COMPRESSED: %lld\n",
-			(long long)bytes_comp);
-		fflush(stats_fp);
-
-		gwf_set64_destroy(hs);
-		gwf_set64_destroy(hv);
-
-		/*
-		 * BFS subgraph stats.
-		 *
-		 * bfs_set was built before the while loop. Here we
-		 * just compute and print stats from it.
-		 */
-		if (bfs_set) {
-			double bfs_ms;
-			gwf_set64_t *bfs_seg;
-			int32_t bfs_nv = 0, bfs_ns = 0, bfs_ne = 0;
-			int64_t bfs_comp = 0, bfs_idx_arc = 0;
-			int bfs_absent;
-
-			bfs_ms = (double)(clk1 - clk0)
-				/ CLOCKS_PER_SEC * 1000.0;
-
-			/*
-			 * Vertices are oriented (vertex_id = seg_id<<1|ori),
-			 * so we deduplicate into segments (v>>1) to avoid
-			 * counting both orientations of the same sequence.
-			 *
-			 * Compressed size =
-			 *   per segment: sizeof(int32_t) + ceil(len/4)
-			 *   per vertex: sizeof(uint64_t) for idx entry
-			 *     + n_arcs * sizeof(gfa_arc_t)
-			 */
-			bfs_seg = gwf_set64_init2(z->buf.km);
-			for (k = 0; k < kh_end(bfs_set); ++k) {
-				if (kh_exist(bfs_set, k)) {
-					uint32_t v = (uint32_t)bfs_set->keys[k];
-					int32_t nv = gfa_arc_n(z->g, v);
-					bfs_nv++;
-					bfs_ne += nv;
-					bfs_idx_arc += sizeof(uint64_t)
-						+ (int64_t)nv * sizeof(gfa_arc_t);
-					gwf_set64_put(bfs_seg,
-						(uint64_t)(v >> 1), &bfs_absent);
-				}
-			}
-			for (k = 0; k < kh_end(bfs_seg); ++k) {
-				if (kh_exist(bfs_seg, k)) {
-					uint32_t s = (uint32_t)bfs_seg->keys[k];
-					int32_t slen = z->g->seg[s].len;
-					bfs_ns++;
-					bfs_comp += sizeof(int32_t)
-						+ (slen + 3) / 4;
-				}
-			}
-			bfs_comp += bfs_idx_arc;
-
-			fprintf(stats_fp, "BFS_TIME_MS: %.3f\n", bfs_ms);
-			fprintf(stats_fp, "BFS_VERTICES: %d\n", bfs_nv);
-			fprintf(stats_fp, "BFS_SEGMENTS: %d\n", bfs_ns);
-			fprintf(stats_fp, "BFS_EDGES: %d\n", bfs_ne);
-			fprintf(stats_fp, "BFS_BYTES_COMPRESSED: %lld\n",
-				(long long)bfs_comp);
-			fflush(stats_fp);
-
-			gwf_set64_destroy(bfs_seg);
-		}
-		if (bfs_set)
-			gwf_set64_destroy(bfs_set);
+	{
+		FILE *fp = gwf_scores_fp();
+		if (fp) { fprintf(fp, "%d\n", r->s); fflush(fp); }
 	}
 }
 

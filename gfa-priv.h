@@ -99,6 +99,36 @@ void gfa_ed_destroy(void *z_);
 
 int32_t gfa_edit_dist(void *km, const gfa_edopt_t *opt, const gfa_t *g, const gfa_edseq_t *es, int32_t ql, const char *q, uint32_t v0, int32_t off0, gfa_edrst_t *rst);
 
+// Stripped arc: only fields used by gwf_ed_extend
+typedef struct {
+	uint32_t v;   // source vertex (for sorting/indexing)
+	uint32_t w;   // target vertex
+	int32_t ow;   // overlap on target
+} subgfa_arc_t;
+
+typedef struct {
+	uint32_t n_seg;       // segment count
+	uint64_t n_arc;       // arc count
+	gfa_edseq_t *es;      // per-segment seq+len (size n_seg)
+	                      //   forward strand only
+	subgfa_arc_t *arc;       // sorted by v
+	uint64_t *idx;        // seg -> arc index (same hi32/lo32
+	                      //   format as gfa_t)
+} subgfa_subgraph_t;
+
+// Auxiliary: vertex remapping (separate from graph)
+typedef struct {
+	uint32_t n_seg;
+	uint32_t *seg_map;    // new_seg -> old_seg (size n_seg)
+} subgfa_vmap_t;
+
+subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
+	const gfa_edseq_t *es, uint32_t v0, uint32_t v1,
+	int32_t off0, int32_t off1, int32_t budget,
+	subgfa_vmap_t *vmap);
+void subgfa_subgraph_destroy(subgfa_subgraph_t *sub);
+void subgfa_vmap_destroy(subgfa_vmap_t *vmap);
+
 // assembly related routines
 int gfa_arc_del_trans(gfa_t *g, int fuzz); // transitive reduction
 int gfa_arc_del_weak(gfa_t *g);
