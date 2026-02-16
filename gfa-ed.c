@@ -350,7 +350,7 @@ static inline int32_t gwf_extend1(int32_t d, int32_t k, int32_t vl, const char *
 }
 
 // This is essentially Landau-Vishkin for linear sequences. The function speeds up alignment to long vertices. Not really necessary.
-static void gwf_ed_extend_batch(void *km, const gfa_t *g, const gfa_edseq_t *es, int32_t ql, const char *q, int32_t n, gwf_diag_t *a, gwf_diag_v *B,
+static void gwf_ed_extend_batch(void *km, const gfa_edseq_t *es, int32_t ql, const char *q, int32_t n, gwf_diag_t *a, gwf_diag_v *B,
 								kdq_t(gwf_diag_t) *A, gwf_intv_v *tmp_intv, gfa_edrst_t *r)
 {
 	int32_t j, m;
@@ -425,7 +425,7 @@ static void gwf_ed_extend_batch(void *km, const gfa_t *g, const gfa_edseq_t *es,
 //This function demonstrates, 1) that we are not doing affine gap, and 2) that
 //we are doing base level alignment
 // wfa_extend and wfa_next combined
-static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const gfa_t *g, const gfa_edseq_t *es, int32_t s, int32_t ql, const char *q,
+static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const subgfa_subgraph_t *sub, const gfa_edseq_t *es, int32_t s, int32_t ql, const char *q,
 								 uint32_t v1, int32_t off1, int32_t *end_tb, int32_t *n_a_, gwf_diag_t *a, gfa_edrst_t *r)
 {
 	int32_t i, x, n = *n_a_, do_dedup = 1;
@@ -448,7 +448,7 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 #else // optimized for long vertices.
 	for (x = 0, i = 1; i <= n; ++i) {
 		if (i == n || a[i].vd != a[i-1].vd + 1) {
-			gwf_ed_extend_batch(buf->km, g, es, ql, q, i - x, &a[x], &B, A, &buf->tmp, r);
+			gwf_ed_extend_batch(buf->km, es, ql, q, i - x, &a[x], &B, A, &buf->tmp, r);
 			x = i;
 		}
 	}
@@ -483,9 +483,9 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 			if (push2 || push1) gwf_diag_push(buf->km, &B, v, d,   k+1, x0 + 2, 1, t.t);
 			gwf_diag_push(buf->km, &B, v, d+1, k, x0 + 1, ooo, t.t);
     //This else is the branchy weirdness part where you keep pushing along edges
-		} else if (i + 1 < ql) { // k + 1 == g->len[v]; reaching the end of the vertex but not the end of query
-			int32_t nv = gfa_arc_n(g, v), j, n_ext = 0, tw = -1;
-			gfa_arc_t *av = gfa_arc_a(g, v);
+		} else if (i + 1 < ql) { // k + 1 == vl; reaching the end of the vertex but not the end of query
+			int32_t nv = subgfa_arc_n(sub, v), j, n_ext = 0, tw = -1;
+			const subgfa_arc_t *av = subgfa_arc_a(sub, v);
 			gwf_intv_t *p;
 			kv_pushp(gwf_intv_t, buf->km, buf->tmp, &p);
 			p->vd0 = gwf_gen_vd(v, d), p->vd1 = p->vd0 + 1;
@@ -516,9 +516,9 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 			return 0;
 		} else if (k + 1 < vl) { // i + 1 == ql; reaching the end of the query but not the end of the vertex
 			gwf_diag_push(buf->km, &B, v, d-1, k+1, x0 + 1, ooo, t.t); // add an deletion; this *might* case a duplicate in corner cases
-		} else if (v != v1) { // i + 1 == ql && k + 1 == g->len[v]; not reaching the last vertex $v1
-			int32_t nv = gfa_arc_n(g, v), j, tw = -1;
-			const gfa_arc_t *av = gfa_arc_a(g, v);
+		} else if (v != v1) { // i + 1 == ql && k + 1 == vl; not reaching the last vertex $v1
+			int32_t nv = subgfa_arc_n(sub, v), j, tw = -1;
+			const subgfa_arc_t *av = subgfa_arc_a(sub, v);
 			if (opt->traceback) tw = gwf_trace_push(buf->km, &buf->t, v, t.t, buf->ht);
 			for (j = 0; j < nv; ++j)
 				gwf_diag_push(buf->km, &B, av[j].w, i - av[j].ow, av[j].ow, x0 + 1, 1, tw); // deleting the first base on the next vertex
@@ -718,7 +718,7 @@ static void gwf_bfs_reachable(void *km, const gfa_t *g,
 subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 	const gfa_edseq_t *es, uint32_t v0, uint32_t v1,
 	int32_t off0, int32_t off1, int32_t budget,
-	subgfa_vmap_t *vmap)
+	int32_t **seg_remap_out)
 {
 	void *km;
 	gwf_set64_t *vset, *seg_set;
@@ -771,22 +771,15 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 	// 4. Allocate subgraph
 	sub = (subgfa_subgraph_t*)calloc(
 		1, sizeof(subgfa_subgraph_t));
-	sub->n_seg = n_seg;
+	sub->n_vtx = n_seg * 2;
 
-	// 5. Fill vmap
-	vmap->n_seg = n_seg;
-	vmap->seg_map = (uint32_t*)malloc(
-		n_seg * sizeof(uint32_t));
-	for (i = 0; i < n_seg; ++i)
-		vmap->seg_map[i] = segs[i];
-
-	// 6. Populate es[] (forward strand only)
+	// 5. Populate es[] (both strands)
 	sub->es = (gfa_edseq_t*)malloc(
-		n_seg * sizeof(gfa_edseq_t));
+		n_seg * 2 * sizeof(gfa_edseq_t));
 	for (i = 0; i < n_seg; ++i) {
 		uint32_t old_s = segs[i];
-		sub->es[i].seq = es[old_s << 1].seq;
-		sub->es[i].len = es[old_s << 1].len;
+		sub->es[i<<1]   = es[old_s << 1];
+		sub->es[i<<1|1] = es[old_s << 1 | 1];
 	}
 
 	// 7. Count arcs (both endpoints in vertex set)
@@ -820,9 +813,11 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 					vset, (uint64_t)av[j].w);
 				if (kw < kh_end(vset)) {
 					sub->arc[arc_idx].v =
-						seg_remap[v >> 1];
+						(seg_remap[v >> 1] << 1)
+						| (v & 1);
 					sub->arc[arc_idx].w =
-						seg_remap[av[j].w >> 1];
+						(seg_remap[av[j].w >> 1] << 1)
+						| (av[j].w & 1);
 					sub->arc[arc_idx].ow = av[j].ow;
 					++arc_idx;
 				}
@@ -833,9 +828,9 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 	// 9. Sort arcs by source v
 	radix_sort_subgfa_arc(sub->arc, sub->arc + n_arc);
 
-	// 10. Build idx[] (size n_seg)
+	// 10. Build idx[] (size n_vtx)
 	sub->idx = (uint64_t*)calloc(
-		n_seg, sizeof(uint64_t));
+		n_seg * 2, sizeof(uint64_t));
 	if (n_arc > 0) {
 		uint32_t cur_v = sub->arc[0].v;
 		uint64_t start = 0;
@@ -852,9 +847,9 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 		}
 	}
 
-	// 11. Free BFS temporaries
+	// 11. Free BFS temporaries; return seg_remap
 	free(segs);
-	free(seg_remap);
+	*seg_remap_out = seg_remap;
 	gwf_set64_destroy(vset);
 	km_destroy(km);
 	return sub;
@@ -867,14 +862,6 @@ void subgfa_subgraph_destroy(subgfa_subgraph_t *sub)
 	free(sub->arc);
 	free(sub->idx);
 	free(sub);
-}
-
-void subgfa_vmap_destroy(subgfa_vmap_t *vmap)
-{
-	if (!vmap) return;
-	free(vmap->seg_map);
-	vmap->seg_map = NULL;
-	vmap->n_seg = 0;
 }
 
 typedef struct {
@@ -921,46 +908,71 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 {
 	gfa_edbuf_t *z = (gfa_edbuf_t*)z_;
 	const gfa_edopt_t *opt = z->opt;
-	if (s_term < 0 && z->opt->s_term >= 0) s_term = z->opt->s_term;
+	int32_t i;
+	int32_t *seg_remap = NULL;
+	subgfa_subgraph_t *sub;
+	uint32_t rv1;
+
+	if (s_term < 0 && z->opt->s_term >= 0)
+		s_term = z->opt->s_term;
 	s_term = 3000;
 	r->n_end = 0, r->n_iter = 0;
 
-	subgfa_subgraph_t *sub = NULL;
-	subgfa_vmap_t vmap = {0};
-	if (v1 != (uint32_t)-1)
-		sub = subgfa_subgraph(z->g, z->es,
-			z->v0, v1, z->off0, off1,
-			z->ql + s_term, &vmap);
+	assert(v1 != (uint32_t)-1);
+	sub = subgfa_subgraph(z->g, z->es,
+		z->v0, v1, z->off0, off1,
+		z->ql + s_term, &seg_remap);
 
-  //This for loop consists of the extend funciton, and a bunch of termination
-  //condition behaviour
+	// Remap wavefront to compact vertex space
+	// In actuallity, we are only remapping the start vertex
+	rv1 = (seg_remap[v1 >> 1] << 1) | (v1 & 1);
+	for (i = 0; i < z->n_a; ++i) {
+		uint32_t old_v = z->a[i].vd >> 32;
+		int32_t d = (int32_t)z->a[i].vd
+			- GWF_DIAG_SHIFT;
+		uint32_t new_v =
+			(seg_remap[old_v >> 1] << 1)
+			| (old_v & 1);
+		z->a[i].vd = gwf_gen_vd(new_v, d);
+	}
+
 	while (z->n_a > 0) {
-		z->a = gwf_ed_extend(&z->buf, opt, z->g, z->es, z->s, z->ql, z->q, v1, off1, &z->end_tb, &z->n_a, z->a, r);
-		r->n_iter += z->n_a; // + z->buf.intv.n;
-		if (r->end_off >= 0 || z->n_a == 0) break; //end offset probably only 
-                                               //becomes >=0 when you reach the
-                                               //end of a node. So this is
-                                               //standard stopping condition
+		z->a = gwf_ed_extend(&z->buf, opt, sub,
+			sub->es, z->s, z->ql, z->q,
+			rv1, off1,
+			&z->end_tb, &z->n_a, z->a, r);
+		r->n_iter += z->n_a;
+		if (r->end_off >= 0 || z->n_a == 0) break;
 		if (r->n_end > 0) break;
-		if (s_term >= 0 && z->s >= s_term) break; //terminate if score is outta ctrl
-		if (z->opt->i_term > 0 && r->n_iter > z->opt->i_term) break;
-		++z->s; //I guess this is (z->s)++. It makes me think s is the score
+		if (s_term >= 0 && z->s >= s_term) break;
+		if (z->opt->i_term > 0
+			&& r->n_iter > z->opt->i_term) break;
+		++z->s;
 		if (gfa_ed_dbg >= 1) {
-			printf("[%s] dist=%d, n=%d, n_intv=%ld, n_tb=%ld\n", __func__, z->s, z->n_a, z->buf.intv.n, z->buf.t.n);
-			if (gfa_ed_dbg == 2) gwf_ed_print_diag(z->g, z->n_a, z->a);
-			if (gfa_ed_dbg == 3) gwf_ed_print_intv(z->buf.intv.n, z->buf.intv.a);
+			printf("[%s] dist=%d, n=%d, n_intv=%ld,"
+				" n_tb=%ld\n", __func__, z->s,
+				z->n_a, z->buf.intv.n,
+				z->buf.t.n);
+			if (gfa_ed_dbg == 3)
+				gwf_ed_print_intv(
+					z->buf.intv.n,
+					z->buf.intv.a);
 		}
 	}
 	if (opt->traceback && r->end_off >= 0)
-		gwf_traceback(&z->buf, r->end_v, z->end_tb, r);
+		gwf_traceback(&z->buf, r->end_v,
+			z->end_tb, r);
 	r->s = r->end_v != (uint32_t)-1? z->s : -1;
 
-	if (sub) subgfa_subgraph_destroy(sub);
-	subgfa_vmap_destroy(&vmap);
+	subgfa_subgraph_destroy(sub);
+	free(seg_remap);
 
 	{
 		FILE *fp = gwf_scores_fp();
-		if (fp) { fprintf(fp, "%d\n", r->s); fflush(fp); }
+		if (fp) {
+			fprintf(fp, "%d\n", r->s);
+			fflush(fp);
+		}
 	}
 }
 

@@ -107,27 +107,18 @@ typedef struct {
 } subgfa_arc_t;
 
 typedef struct {
-	uint32_t n_seg;       // segment count
+	uint32_t n_vtx;       // = n_seg * 2 (compact)
 	uint64_t n_arc;       // arc count
-	gfa_edseq_t *es;      // per-segment seq+len (size n_seg)
-	                      //   forward strand only
-	subgfa_arc_t *arc;       // sorted by v
-	uint64_t *idx;        // seg -> arc index (same hi32/lo32
-	                      //   format as gfa_t)
+	gfa_edseq_t *es;      // size n_vtx (both strands)
+	subgfa_arc_t *arc;       // v,w are compact vertex IDs
+	uint64_t *idx;        // size n_vtx
 } subgfa_subgraph_t;
-
-// Auxiliary: vertex remapping (separate from graph)
-typedef struct {
-	uint32_t n_seg;
-	uint32_t *seg_map;    // new_seg -> old_seg (size n_seg)
-} subgfa_vmap_t;
 
 subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 	const gfa_edseq_t *es, uint32_t v0, uint32_t v1,
 	int32_t off0, int32_t off1, int32_t budget,
-	subgfa_vmap_t *vmap);
+	int32_t **seg_remap_out);
 void subgfa_subgraph_destroy(subgfa_subgraph_t *sub);
-void subgfa_vmap_destroy(subgfa_vmap_t *vmap);
 
 // assembly related routines
 int gfa_arc_del_trans(gfa_t *g, int fuzz); // transitive reduction
