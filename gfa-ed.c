@@ -1053,18 +1053,17 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 		}
 	}
 
-	r->s = r->end_v != (uint32_t)-1? z->s : -1;
-
-	subgfa_subgraph_destroy(sub);
-	free(seg_remap);
-
+	int finalScore = terminate ? z->s : -1;
 	{
 		FILE *fp = gwf_scores_fp();
 		if (fp) {
-			fprintf(fp, "%d\n", r->s);
+			fprintf(fp, "%d\n", finalScore);
 			fflush(fp);
 		}
 	}
+
+	subgfa_subgraph_destroy(sub);
+	free(seg_remap);
 }
 
 void gfa_ed_destroy(void *z_)
