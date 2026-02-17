@@ -8,11 +8,20 @@
 #include "kdq.h"
 #include "kvec-km.h"
 
-int gfa_ed_dbg = 0;
+#ifndef GFA_ED_DBG
+#define GFA_ED_DBG 0
+#endif
+int gfa_ed_dbg = GFA_ED_DBG;
 
 static FILE *gwf_scores_fp(void) {
 	static FILE *fp;
 	if (!fp) fp = fopen("scores.txt", "a");
+	return fp;
+}
+
+static FILE *gwf_wf_debug_fp(void) {
+	static FILE *fp;
+	if (!fp) fp = fopen("wfDebug.txt", "w");
 	return fp;
 }
 
@@ -561,9 +570,29 @@ static void gwf_ed_print_diag(const gfa_t *g, size_t n, gwf_diag_t *a) // for de
 
 static void gwf_ed_print_intv(size_t n, gwf_intv_t *a) // for debugging only
 {
+	FILE *fp = gwf_wf_debug_fp();
 	size_t i;
 	for (i = 0; i < n; ++i)
-		printf("Z\t%d\t%d\t%d\n", (int32_t)(a[i].vd0>>32), (int32_t)a[i].vd0 - GWF_DIAG_SHIFT, (int32_t)a[i].vd1 - GWF_DIAG_SHIFT);
+		fprintf(fp, "Z\t%d\t%d\t%d\n",
+			(int32_t)(a[i].vd0>>32),
+			(int32_t)a[i].vd0 - GWF_DIAG_SHIFT,
+			(int32_t)a[i].vd1 - GWF_DIAG_SHIFT);
+	fflush(fp);
+}
+
+static void gwf_ed_print_wf(int32_t n,
+	const gwf_diag_t *a)
+{
+	FILE *fp = gwf_wf_debug_fp();
+	int32_t i;
+	for (i = 0; i < n; ++i) {
+		int32_t nid = (int32_t)(a[i].vd >> 32);
+		int32_t diag = (int32_t)a[i].vd
+			- GWF_DIAG_SHIFT;
+		fprintf(fp, "WF\t%d\t%d\t%d\n",
+			nid, diag, a[i].k);
+	}
+	fflush(fp);
 }
 
 /*
@@ -707,6 +736,28 @@ static void gwf_bfs_reachable(void *km, const gfa_t *g,
 		}
 	}
 
+	{
+		khint_t k0 = gwf_set64_get(result, (uint64_t)v0);
+		khint_t k1 = gwf_set64_get(result, (uint64_t)v1);
+		if (k0 >= kh_end(result)
+			|| k1 >= kh_end(result)) {
+			fprintf(stderr,
+				"[gwf_bfs] v0=%u %s subgraph, "
+				"v1=%u %s subgraph, budget=%d\n",
+				v0,
+				k0 < kh_end(result)
+					? "IN" : "NOT IN",
+				v1,
+				k1 < kh_end(result)
+					? "IN" : "NOT IN",
+				budget);
+			kfree(km, queue.a);
+			gwf_map64_destroy(fwd);
+			gwf_map64_destroy(bwd);
+			return;
+		}
+	}
+
 	kfree(km, queue.a);
 	gwf_map64_destroy(fwd);
 	gwf_map64_destroy(bwd);
@@ -734,6 +785,13 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 	vset = gwf_set64_init2(km);
 	gwf_bfs_reachable(km, g, es, v0, v1, off0, off1,
 		budget, vset);
+
+	if (kh_size(vset) == 0) {
+		gwf_set64_destroy(vset);
+		km_destroy(km);
+		*seg_remap_out = NULL;
+		return NULL;
+	}
 
 	// 2. Collect unique segment IDs
 	segs = (uint32_t*)malloc(
@@ -923,6 +981,18 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 		z->v0, v1, z->off0, off1,
 		z->ql + s_term, &seg_remap);
 
+	if (sub == NULL) {
+		r->s = -1;
+		r->end_v = (uint32_t)-1;
+		r->end_off = -1;
+		FILE *fp = gwf_scores_fp();
+		if (fp) {
+			fprintf(fp, "%d\n", -1);
+			fflush(fp);
+		}
+		return;
+	}
+
 	// Remap wavefront to compact vertex space
 	// In actuallity, we are only remapping the start vertex
 	rv1 = (seg_remap[v1 >> 1] << 1) | (v1 & 1);
@@ -949,14 +1019,18 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 			&& r->n_iter > z->opt->i_term) break;
 		++z->s;
 		if (gfa_ed_dbg >= 1) {
-			printf("[%s] dist=%d, n=%d, n_intv=%ld,"
+			fprintf(gwf_wf_debug_fp(),
+			    "[%s] dist=%d, n=%d, n_intv=%ld,"
 				" n_tb=%ld\n", __func__, z->s,
 				z->n_a, z->buf.intv.n,
 				z->buf.t.n);
-			if (gfa_ed_dbg == 3)
+			if (gfa_ed_dbg == 4) {
 				gwf_ed_print_intv(
 					z->buf.intv.n,
 					z->buf.intv.a);
+				gwf_ed_print_wf(
+					z->n_a, z->a);
+			}
 		}
 	}
 	if (opt->traceback && r->end_off >= 0)
