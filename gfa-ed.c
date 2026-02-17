@@ -178,31 +178,20 @@ static inline int32_t gwf_diag_update(gwf_diag_t *p, uint32_t v, int32_t d, int3
 	return 1;
 }
 
-static int gwf_diag_is_sorted(int32_t n_a, const gwf_diag_t *a)
-{
-	int32_t i;
-	for (i = 1; i < n_a; ++i)
-		if (a[i-1].vd > a[i].vd) break;
-	return (i == n_a);
-}
-
-// sort a[]. This uses the gwf_diag_t::ooo field to speed up sorting.
-static void gwf_diag_sort(int32_t n_a, gwf_diag_t *a, void *km, gwf_diag_v *ooo)
+// sort a[] using n_sorted as the sorted/unsorted split point.
+static void gwf_diag_sort(int32_t n_a, gwf_diag_t *a,
+	int32_t n_sorted, void *km, gwf_diag_v *buf)
 {
 	int32_t i, j, k, n_b, n_c;
 	gwf_diag_t *b, *c;
 
-	kv_resize(gwf_diag_t, km, *ooo, n_a);
-	for (i = 0, n_c = 0; i < n_a; ++i)
-		if (a[i].xo&1) ++n_c;
-	n_b = n_a - n_c;
-	b = ooo->a, c = b + n_b;
-	for (i = j = k = 0; i < n_a; ++i) {
-		if (a[i].xo&1) c[k++] = a[i];
-		else b[j++] = a[i];
-	}
+	n_b = n_sorted;
+	n_c = n_a - n_sorted;
+	kv_resize(gwf_diag_t, km, *buf, n_a);
+	b = buf->a, c = b + n_b;
+	memcpy(b, a, n_b * sizeof(*a));
+	memcpy(c, a + n_b, n_c * sizeof(*a));
 	radix_sort_gwf_ed(c, c + n_c);
-	for (k = 0; k < n_c; ++k) c[k].xo &= 0xfffffffeU;
 
 	i = j = k = 0;
 	while (i < n_b && j < n_c) {
@@ -215,11 +204,12 @@ static void gwf_diag_sort(int32_t n_a, gwf_diag_t *a, void *km, gwf_diag_v *ooo)
 }
 
 // remove diagonals not on the wavefront
-static int32_t gwf_diag_dedup(int32_t n_a, gwf_diag_t *a, void *km, gwf_diag_v *ooo)
+static int32_t gwf_diag_dedup(int32_t n_a, gwf_diag_t *a,
+	int32_t n_sorted, void *km, gwf_diag_v *buf)
 {
 	int32_t i, n, st;
-	if (!gwf_diag_is_sorted(n_a, a))
-		gwf_diag_sort(n_a, a, km, ooo);
+	if (n_sorted < n_a)
+		gwf_diag_sort(n_a, a, n_sorted, km, buf);
 	for (i = 1, st = 0, n = 0; i <= n_a; ++i) {
 		if (i == n_a || a[i].vd != a[st].vd) {
 			int32_t j, max_j = st;
@@ -285,23 +275,30 @@ typedef struct {
 	gwf_map64_t *ht; // hash table for traceback
 	gwf_intv_v intv;
 	gwf_intv_v tmp, swap;
-	gwf_diag_v ooo;
+	gwf_diag_v sort_buf;
 	gwf_trace_v t;
 } gwf_edbuf_t;
 
 // remove diagonals not on the wavefront
-static int32_t gwf_dedup(gwf_edbuf_t *buf, int32_t n_a, gwf_diag_t *a)
+static int32_t gwf_dedup(gwf_edbuf_t *buf,
+	int32_t n_a, gwf_diag_t *a, int32_t n_sorted)
 {
 	if (buf->intv.n + buf->tmp.n > 0) {
 		if (!gwf_intv_is_sorted(buf->tmp.n, buf->tmp.a))
-			radix_sort_gwf_intv(buf->tmp.a, buf->tmp.a + buf->tmp.n);
+			radix_sort_gwf_intv(buf->tmp.a,
+				buf->tmp.a + buf->tmp.n);
 		kv_copy(gwf_intv_t, buf->km, buf->swap, buf->intv);
-		kv_resize(gwf_intv_t, buf->km, buf->intv, buf->intv.n + buf->tmp.n);
-		buf->intv.n = gwf_intv_merge2(buf->intv.a, buf->swap.n, buf->swap.a, buf->tmp.n, buf->tmp.a);
+		kv_resize(gwf_intv_t, buf->km, buf->intv,
+			buf->intv.n + buf->tmp.n);
+		buf->intv.n = gwf_intv_merge2(buf->intv.a,
+			buf->swap.n, buf->swap.a,
+			buf->tmp.n, buf->tmp.a);
 	}
-	n_a = gwf_diag_dedup(n_a, a, buf->km, &buf->ooo);
+	n_a = gwf_diag_dedup(n_a, a, n_sorted,
+		buf->km, &buf->sort_buf);
 	if (buf->intv.n > 0)
-		n_a = gwf_mixed_dedup(n_a, a, buf->intv.n, buf->intv.a);
+		n_a = gwf_mixed_dedup(n_a, a,
+			buf->intv.n, buf->intv.a);
 	return n_a;
 }
 
@@ -468,6 +465,7 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
 	}
 	if (kdq_size(A) == 0) do_dedup = 0;
 #endif
+	int32_t n_sorted = B.n;
 	kfree(buf->km, a); // $a is not used as it has been copied to $A
 
 	while (kdq_size(A)) {
@@ -541,7 +539,7 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
 	kdq_destroy(gwf_diag_t, A);
 	*n_a_ = n = B.n, b = B.a;
 
-	if (do_dedup) *n_a_ = n = gwf_dedup(buf, n, b);
+	if (do_dedup) *n_a_ = n = gwf_dedup(buf, n, b, n_sorted);
 	return b;
 }
 
@@ -1073,7 +1071,7 @@ void gfa_ed_destroy(void *z_)
 	kfree(km, z->a);
 	gwf_set64_destroy(z->buf.ha);
 	gwf_map64_destroy(z->buf.ht);
-	kfree(km, z->buf.ooo.a);
+	kfree(km, z->buf.sort_buf.a);
 	kfree(km, z->buf.intv.a);
 	kfree(km, z->buf.tmp.a);
 	kfree(km, z->buf.swap.a);
