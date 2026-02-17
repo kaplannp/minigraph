@@ -8,7 +8,22 @@
 #include "kdq.h"
 #include "kvec-km.h"
 
-int gfa_ed_dbg = 0;
+#ifndef GFA_ED_DBG
+#define GFA_ED_DBG 0
+#endif
+int gfa_ed_dbg = GFA_ED_DBG;
+
+static FILE *gwf_wf_debug_fp(void) {
+	static FILE *fp;
+	if (!fp) fp = fopen("wfDebug.txt", "w");
+	return fp;
+}
+
+static FILE *gwf_scores_fp(void) {
+	static FILE *fp;
+	if (!fp) fp = fopen("scores.txt", "a");
+	return fp;
+}
 
 /***************
  * Preparation *
@@ -501,8 +516,8 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 	*n_a_ = n = B.n, b = B.a;
 
 	if (do_dedup) *n_a_ = n = gwf_dedup(buf, n, b);
-	if (opt->max_lag > 0 && n > opt->max_chk && ((s+1)&0xf) == 0)
-		*n_a_ = n = gwf_prune(n, b, opt->max_lag, opt->bw_dyn);
+	//if (opt->max_lag > 0 && n > opt->max_chk && ((s+1)&0xf) == 0)
+	//	*n_a_ = n = gwf_prune(n, b, opt->max_lag, opt->bw_dyn);
 	return b;
 }
 
@@ -532,9 +547,25 @@ static void gwf_ed_print_diag(const gfa_t *g, size_t n, gwf_diag_t *a) // for de
 
 static void gwf_ed_print_intv(size_t n, gwf_intv_t *a) // for debugging only
 {
+	FILE *fp = gwf_wf_debug_fp();
 	size_t i;
 	for (i = 0; i < n; ++i)
-		printf("Z\t%d\t%d\t%d\n", (int32_t)(a[i].vd0>>32), (int32_t)a[i].vd0 - GWF_DIAG_SHIFT, (int32_t)a[i].vd1 - GWF_DIAG_SHIFT);
+		fprintf(fp, "Z\t%d\t%d\t%d\n", (int32_t)(a[i].vd0>>32), (int32_t)a[i].vd0 - GWF_DIAG_SHIFT, (int32_t)a[i].vd1 - GWF_DIAG_SHIFT);
+}
+
+static void gwf_ed_print_wf(int32_t n,
+	const gwf_diag_t *a)
+{
+	FILE *fp = gwf_wf_debug_fp();
+	int32_t i;
+	for (i = 0; i < n; ++i) {
+		int32_t nid = (int32_t)(a[i].vd >> 32);
+		int32_t diag = (int32_t)a[i].vd
+			- GWF_DIAG_SHIFT;
+		fprintf(fp, "WF\t%d\t%d\t%d\n",
+			nid, diag, a[i].k);
+	}
+	fflush(fp);
 }
 
 typedef struct {
@@ -572,6 +603,7 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 	gfa_edbuf_t *z = (gfa_edbuf_t*)z_;
 	const gfa_edopt_t *opt = z->opt;
 	if (s_term < 0 && z->opt->s_term >= 0) s_term = z->opt->s_term;
+	s_term = 3000;
 	r->n_end = 0, r->n_iter = 0;
 	while (z->n_a > 0) {
 		z->a = gwf_ed_extend(&z->buf, opt, z->g, z->es, z->s, z->ql, z->q, v1, off1, &z->end_tb, &z->n_a, z->a, r);
@@ -582,14 +614,30 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 		if (z->opt->i_term > 0 && r->n_iter > z->opt->i_term) break;
 		++z->s;
 		if (gfa_ed_dbg >= 1) {
-			printf("[%s] dist=%d, n=%d, n_intv=%ld, n_tb=%ld\n", __func__, z->s, z->n_a, z->buf.intv.n, z->buf.t.n);
-			if (gfa_ed_dbg == 2) gwf_ed_print_diag(z->g, z->n_a, z->a);
-			if (gfa_ed_dbg == 3) gwf_ed_print_intv(z->buf.intv.n, z->buf.intv.a);
+			fprintf(gwf_wf_debug_fp(),
+				"[%s] dist=%d, n=%d, n_intv=%ld,"
+				" n_tb=%ld\n", __func__, z->s,
+				z->n_a, z->buf.intv.n,
+				z->buf.t.n);
+			if (gfa_ed_dbg == 4) {
+				gwf_ed_print_intv(
+					z->buf.intv.n,
+					z->buf.intv.a);
+				gwf_ed_print_wf(
+					z->n_a, z->a);
+			}
 		}
 	}
 	if (opt->traceback && r->end_off >= 0)
 		gwf_traceback(&z->buf, r->end_v, z->end_tb, r);
 	r->s = r->end_v != (uint32_t)-1? z->s : -1;
+	{
+		FILE *fp = gwf_scores_fp();
+		if (fp) {
+			fprintf(fp, "%d\n", r->s);
+			fflush(fp);
+		}
+	}
 }
 
 void gfa_ed_destroy(void *z_)
