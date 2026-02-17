@@ -359,13 +359,17 @@ static inline int32_t gwf_extend1(int32_t d, int32_t k, int32_t vl, const char *
 }
 
 // This is essentially Landau-Vishkin for linear sequences. The function speeds up alignment to long vertices. Not really necessary.
-static void gwf_ed_extend_batch(void *km, const gfa_edseq_t *es, int32_t ql, const char *q, int32_t n, gwf_diag_t *a, gwf_diag_v *B,
-								kdq_t(gwf_diag_t) *A, gwf_intv_v *tmp_intv, gfa_edrst_t *r)
+static void gwf_ed_extend_batch(void *km,
+	const subgfa_subgraph_t *sub,
+	int32_t ql, const char *q, int32_t n,
+	gwf_diag_t *a, gwf_diag_v *B,
+	kdq_t(gwf_diag_t) *A,
+	gwf_intv_v *tmp_intv, gfa_edrst_t *r)
 {
 	int32_t j, m;
 	int32_t v = a->vd>>32;
-	int32_t vl = es[v].len;
-	const char *ts = es[v].seq;
+	int32_t vl = sub->seq_len[v];
+	const char *ts = sub->graphSeq + sub->seq_off[v];
 	gwf_diag_t *b;
 
 	// wfa_extend
@@ -434,8 +438,13 @@ static void gwf_ed_extend_batch(void *km, const gfa_edseq_t *es, int32_t ql, con
 //This function demonstrates, 1) that we are not doing affine gap, and 2) that
 //we are doing base level alignment
 // wfa_extend and wfa_next combined
-static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const subgfa_subgraph_t *sub, const gfa_edseq_t *es, int32_t s, int32_t ql, const char *q,
-								 uint32_t v1, int32_t off1, int32_t *end_tb, int32_t *n_a_, gwf_diag_t *a, gfa_edrst_t *r)
+static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
+	const gfa_edopt_t *opt,
+	const subgfa_subgraph_t *sub,
+	int32_t s, int32_t ql, const char *q,
+	uint32_t v1, int32_t off1,
+	int32_t *end_tb, int32_t *n_a_,
+	gwf_diag_t *a, gfa_edrst_t *r)
 {
 	int32_t i, x, n = *n_a_, do_dedup = 1;
 	kdq_t(gwf_diag_t) *A; //A is the queue containing the verticies to look at!
@@ -457,7 +466,7 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 #else // optimized for long vertices.
 	for (x = 0, i = 1; i <= n; ++i) {
 		if (i == n || a[i].vd != a[i-1].vd + 1) {
-			gwf_ed_extend_batch(buf->km, es, ql, q, i - x, &a[x], &B, A, &buf->tmp, r);
+			gwf_ed_extend_batch(buf->km, sub, ql, q, i - x, &a[x], &B, A, &buf->tmp, r);
 			x = i;
 		}
 	}
@@ -474,8 +483,8 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 		ooo = t.xo&1, v = t.vd >> 32; // vertex
 		d = (int32_t)t.vd - GWF_DIAG_SHIFT; // diagonal
 		k = t.k; // wavefront position on the vertex
-		vl = es[v].len; // $vl is the vertex length
-		k = gwf_extend1(d, k, vl, es[v].seq, ql, q); //push along diagonal far as you can
+		vl = sub->seq_len[v];
+		k = gwf_extend1(d, k, vl, sub->graphSeq + sub->seq_off[v], ql, q);
 		i = k + d; // query position
 		x0 = (t.xo >> 1) + ((k - t.k) << 1); // current anti diagonal
 
@@ -504,7 +513,7 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 				int32_t ol = av[j].ow;
 				int absent;
 				gwf_set64_put(buf->ha, (uint64_t)w<<32 | (i + 1), &absent); // test if ($w,$i) has been visited
-				if (q[i + 1] == es[w].seq[ol]) { // can be extended to the next vertex without a mismatch
+				if (q[i + 1] == (sub->graphSeq + sub->seq_off[w])[ol]) { // can extend to next vertex without mismatch
 					++n_ext;
 					if (absent) {
 						gwf_diag_t *p;
@@ -831,13 +840,34 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 		1, sizeof(subgfa_subgraph_t));
 	sub->n_vtx = n_seg * 2;
 
-	// 5. Populate es[] (both strands)
-	sub->es = (gfa_edseq_t*)malloc(
-		n_seg * 2 * sizeof(gfa_edseq_t));
-	for (i = 0; i < n_seg; ++i) {
-		uint32_t old_s = segs[i];
-		sub->es[i<<1]   = es[old_s << 1];
-		sub->es[i<<1|1] = es[old_s << 1 | 1];
+	// 5. Build concatenated graphSeq (both strands)
+	GFA_MALLOC(sub->seq_off, n_seg * 2);
+	GFA_MALLOC(sub->seq_len, n_seg * 2);
+	{
+		uint32_t total_len = 0;
+		for (i = 0; i < n_seg; ++i) {
+			uint32_t old_s = segs[i];
+			sub->seq_len[i<<1]   = es[old_s<<1].len;
+			sub->seq_len[i<<1|1] = es[old_s<<1|1].len;
+			total_len += es[old_s<<1].len
+				+ es[old_s<<1|1].len;
+		}
+		GFA_MALLOC(sub->graphSeq, total_len);
+		total_len = 0;
+		for (i = 0; i < n_seg; ++i) {
+			uint32_t old_s = segs[i];
+			int32_t len;
+			len = es[old_s<<1].len;
+			sub->seq_off[i<<1] = total_len;
+			memcpy(sub->graphSeq + total_len,
+				es[old_s<<1].seq, len);
+			total_len += len;
+			len = es[old_s<<1|1].len;
+			sub->seq_off[i<<1|1] = total_len;
+			memcpy(sub->graphSeq + total_len,
+				es[old_s<<1|1].seq, len);
+			total_len += len;
+		}
 	}
 
 	// 7. Count arcs (both endpoints in vertex set)
@@ -916,7 +946,9 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 void subgfa_subgraph_destroy(subgfa_subgraph_t *sub)
 {
 	if (!sub) return;
-	free(sub->es);
+	free(sub->graphSeq);
+	free(sub->seq_off);
+	free(sub->seq_len);
 	free(sub->arc);
 	free(sub->idx);
 	free(sub);
@@ -1008,7 +1040,7 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 
 	while (z->n_a > 0) {
 		z->a = gwf_ed_extend(&z->buf, opt, sub,
-			sub->es, z->s, z->ql, z->q,
+			z->s, z->ql, z->q,
 			rv1, off1,
 			&z->end_tb, &z->n_a, z->a, r);
 		r->n_iter += z->n_a;

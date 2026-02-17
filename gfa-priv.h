@@ -109,7 +109,9 @@ typedef struct {
 typedef struct {
 	uint32_t n_vtx;       // = n_seg * 2 (compact)
 	uint64_t n_arc;       // arc count
-	gfa_edseq_t *es;      // size n_vtx (both strands)
+	char *graphSeq;       // all vertex seqs concatenated
+	uint32_t *seq_off;    // graphSeq offset per vertex
+	int32_t *seq_len;     // seq length per vertex
 	subgfa_arc_t *arc;       // v,w are compact vertex IDs
 	uint64_t *idx;        // size n_vtx
 } subgfa_subgraph_t;
