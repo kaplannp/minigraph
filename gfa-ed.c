@@ -141,7 +141,7 @@ static size_t gwf_intv_merge2(gwf_intv_t *a, size_t n_b, const gwf_intv_t *b, si
  */
 typedef struct { // a diagonal
 	uint64_t vd; // higher 32 bits: vertex ID; lower 32 bits: diagonal+0x4000000
-	int32_t k; //this is how much we've pushed down diagonal I think (d in paper)
+	int32_t k; //this is how much we've pushed down diagonal I think (h in paper)
 	int32_t len;
 	uint32_t xo; // higher 31 bits: anti diagonal; lower 1 bit: out-of-order or not
 	int32_t t; //By process of elimination this is score? Or they have no score
@@ -364,7 +364,7 @@ static void gwf_ed_extend_batch(void *km,
 	int32_t ql, const char *q, int32_t n,
 	gwf_diag_t *a, gwf_diag_v *B,
 	kdq_t(gwf_diag_t) *A,
-	gwf_intv_v *tmp_intv, gfa_edrst_t *r)
+	gwf_intv_v *tmp_intv)
 {
 	int32_t j, m;
 	int32_t v = a->vd>>32;
@@ -439,20 +439,16 @@ static void gwf_ed_extend_batch(void *km,
 //we are doing base level alignment
 // wfa_extend and wfa_next combined
 static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
-	const gfa_edopt_t *opt,
 	const subgfa_subgraph_t *sub,
 	int32_t s, int32_t ql, const char *q,
-	uint32_t v1, int32_t off1,
-	int32_t *end_tb, int32_t *n_a_,
-	gwf_diag_t *a, gfa_edrst_t *r)
+	uint32_t endV, int32_t endOff, int32_t *n_a_,
+	gwf_diag_t *a, int* terminate)
 {
 	int32_t i, x, n = *n_a_, do_dedup = 1;
 	kdq_t(gwf_diag_t) *A; //A is the queue containing the verticies to look at!
 	gwf_diag_v B = {0,0,0};
 	gwf_diag_t *b;
 
-	r->end_v = (uint32_t)-1;
-	r->end_off = *end_tb = -1;
 	buf->tmp.n = 0;
 	gwf_set64_clear(buf->ha); // hash table $h to avoid visiting a vertex twice
 	for (i = 0, x = 1; i < 32; ++i, x <<= 1)
@@ -466,7 +462,7 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
 #else // optimized for long vertices.
 	for (x = 0, i = 1; i <= n; ++i) {
 		if (i == n || a[i].vd != a[i-1].vd + 1) {
-			gwf_ed_extend_batch(buf->km, sub, ql, q, i - x, &a[x], &B, A, &buf->tmp, r);
+			gwf_ed_extend_batch(buf->km, sub, ql, q, i - x, &a[x], &B, A, &buf->tmp);
 			x = i;
 		}
 	}
@@ -507,7 +503,6 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
 			gwf_intv_t *p;
 			kv_pushp(gwf_intv_t, buf->km, buf->tmp, &p);
 			p->vd0 = gwf_gen_vd(v, d), p->vd1 = p->vd0 + 1;
-			if (opt->traceback) tw = gwf_trace_push(buf->km, &buf->t, v, t.t, buf->ht);
 			for (j = 0; j < nv; ++j) { // traverse $v's neighbors
 				uint32_t w = av[j].w; // $w is next to $v
 				int32_t ol = av[j].ow;
@@ -527,20 +522,19 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
 			}
 			if (nv == 0 || n_ext != nv) // add an insertion to the target; this *might* cause a duplicate in corner cases
 				gwf_diag_push(buf->km, &B, v, d+1, k, x0 + 1, 1, t.t);
-		} else if (v1 == (uint32_t)-1 || (v == v1 && k == off1)) { // i + 1 == ql
-			r->end_v = v, r->end_off = k, r->wlen = x0 - i - 1, *end_tb = t.t, *n_a_ = 0;
+		} else if (endV == (uint32_t)-1 || (v == endV && k == endOff)) { // i + 1 == ql
+			*terminate=1;
 			kdq_destroy(gwf_diag_t, A);
 			kfree(buf->km, B.a);
 			return 0;
 		} else if (k + 1 < vl) { // i + 1 == ql; reaching the end of the query but not the end of the vertex
 			gwf_diag_push(buf->km, &B, v, d-1, k+1, x0 + 1, ooo, t.t); // add an deletion; this *might* case a duplicate in corner cases
-		} else if (v != v1) { // i + 1 == ql && k + 1 == vl; not reaching the last vertex $v1
+		} else if (v != endV) { // i + 1 == ql && k + 1 == vl; not reaching the last vertex $endV
 			int32_t nv = subgfa_arc_n(sub, v), j, tw = -1;
 			const subgfa_arc_t *av = subgfa_arc_a(sub, v);
-			if (opt->traceback) tw = gwf_trace_push(buf->km, &buf->t, v, t.t, buf->ht);
 			for (j = 0; j < nv; ++j)
 				gwf_diag_push(buf->km, &B, av[j].w, i - av[j].ow, av[j].ow, x0 + 1, 1, tw); // deleting the first base on the next vertex
-		} else { // may come here when k>off1 (due to banding); do nothing in this case
+		} else { // may come here when k>endOff (due to banding); do nothing in this case
 		}
 	}
 
@@ -548,8 +542,6 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
 	*n_a_ = n = B.n, b = B.a;
 
 	if (do_dedup) *n_a_ = n = gwf_dedup(buf, n, b);
-	if (opt->max_lag > 0 && n > opt->max_chk && ((s+1)&0xf) == 0)
-		*n_a_ = n = gwf_prune(n, b, opt->max_lag, opt->bw_dyn);
 	return b;
 }
 
@@ -1038,17 +1030,12 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 		z->a[i].vd = gwf_gen_vd(new_v, d);
 	}
 
+	int terminate = 0;
 	while (z->n_a > 0) {
-		z->a = gwf_ed_extend(&z->buf, opt, sub,
+		z->a = gwf_ed_extend(&z->buf, sub,
 			z->s, z->ql, z->q,
-			rv1, off1,
-			&z->end_tb, &z->n_a, z->a, r);
-		r->n_iter += z->n_a;
-		if (r->end_off >= 0 || z->n_a == 0) break;
-		if (r->n_end > 0) break;
-		if (s_term >= 0 && z->s >= s_term) break;
-		if (z->opt->i_term > 0
-			&& r->n_iter > z->opt->i_term) break;
+			rv1, off1, &z->n_a, z->a, &terminate);
+		if (terminate || z->s >= s_term) break;
 		++z->s;
 		if (gfa_ed_dbg >= 1) {
 			fprintf(gwf_wf_debug_fp(),
@@ -1065,9 +1052,7 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 			}
 		}
 	}
-	if (opt->traceback && r->end_off >= 0)
-		gwf_traceback(&z->buf, r->end_v,
-			z->end_tb, r);
+
 	r->s = r->end_v != (uint32_t)-1? z->s : -1;
 
 	subgfa_subgraph_destroy(sub);
