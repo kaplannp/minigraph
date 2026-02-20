@@ -543,6 +543,17 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf, const gfa_edopt_t *opt, const
 	*n_a_ = n = B.n, b = B.a;
 
 	if (stats_fp) {
+		fprintf(stats_fp, "HA_ENTRIES: %u\n", kh_size(buf->ha));
+		{ /* count unique node IDs in ha */
+			gwf_set64_t *hv = gwf_set64_init2(buf->km);
+			khint_t ki;
+			int absent;
+			for (ki = 0; ki < kh_end(buf->ha); ++ki)
+				if (kh_exist(buf->ha, ki))
+					gwf_set64_put(hv, buf->ha->keys[ki] >> 32, &absent);
+			fprintf(stats_fp, "HA_NODES: %u\n", kh_size(hv));
+			gwf_set64_destroy(hv);
+		}
 		fprintf(stats_fp, "N_A_NEXT: %d\n", n);
 		fflush(stats_fp);
 	}
