@@ -230,33 +230,7 @@ static int32_t gwf_mixed_dedup(int32_t n_a, gwf_diag_t *a, int32_t n_b, gwf_intv
 	return k;
 }
 
-/*
- * Traceback stack
- */
 KHASHL_MAP_INIT(KH_LOCAL, gwf_map64_t, gwf_map64, uint64_t, int32_t, kh_hash_uint64, kh_eq_generic)
-
-typedef struct {
-	int32_t v;
-	int32_t pre;
-} gwf_trace_t;
-
-typedef kvec_t(gwf_trace_t) gwf_trace_v;
-
-static int32_t gwf_trace_push(void *km, gwf_trace_v *a, int32_t v, int32_t pre, gwf_map64_t *h)
-{
-	uint64_t key = (uint64_t)v << 32 | (uint32_t)pre;
-	khint_t k;
-	int absent;
-	k = gwf_map64_put(h, key, &absent);
-	if (absent) {
-		gwf_trace_t *p;
-		kv_pushp(gwf_trace_t, km, *a, &p);
-		p->v = v, p->pre = pre;
-		kh_val(h, k) = a->n - 1;
-		return a->n - 1;
-	}
-	return kh_val(h, k);
-}
 
 /*
  * Core GWFA routine
@@ -266,12 +240,11 @@ KHASHL_INIT(KH_LOCAL, gwf_set64_t, gwf_set64, uint64_t, kh_hash_dummy, kh_eq_gen
 typedef struct {
 	void *km;
 	gwf_set64_t *ha; // hash table for adjacency
-	gwf_map64_t *ht; // hash table for traceback
 	gwf_intv_v intv;
 	gwf_intv_v tmp, swap;
 	gwf_diag_v sort_buf;
-	gwf_trace_v t;
 } gwf_edbuf_t;
+
 
 // remove diagonals not on the wavefront
 static int32_t gwf_dedup(gwf_edbuf_t *buf,
@@ -410,10 +383,6 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
 	if (i < 4) i = 4;
 	A = kdq_init2(gwf_diag_t, buf->km, i); // $A is a queue
 	kv_resize(gwf_diag_t, buf->km, B, n * 2);
-#if 0 // unoptimized version without calling gwf_ed_extend_batch() at all. The final result will be the same.
-	A->count = n;
-	memcpy(A->a, a, n * sizeof(*a));
-#else // optimized for long vertices.
 	for (x = 0, i = 1; i <= n; ++i) {
 		if (i == n || a[i].vd != a[i-1].vd + 1) {
 			gwf_ed_extend_batch(buf->km, sub, ql, q, i - x, &a[x], &B, A, &buf->tmp);
@@ -421,7 +390,6 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
 		}
 	}
 	if (kdq_size(A) == 0) do_dedup = 0;
-#endif
 	int32_t n_sorted = B.n;
 	kfree(buf->km, a); // $a is not used as it has been copied to $A
 
@@ -512,20 +480,6 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
 	return b;
 }
 
-static void gwf_traceback(gwf_edbuf_t *buf, int32_t end_v, int32_t end_tb, gfa_edrst_t *path)
-{
-	int32_t i = end_tb, n = 1;
-	while (i >= 0 && buf->t.a[i].v >= 0)
-		++n, i = buf->t.a[i].pre;
-	KMALLOC(buf->km, path->v, n);
-	i = end_tb, n = 0;
-	path->v[n++] = end_v;
-	while (i >= 0 && buf->t.a[i].v >= 0)
-		path->v[n++] = buf->t.a[i].v, i = buf->t.a[i].pre;
-	path->nv = n;
-	for (i = 0; i < path->nv>>1; ++i)
-		n = path->v[i], path->v[i] = path->v[path->nv - 1 - i], path->v[path->nv - 1 - i] = n;
-}
 
 static void gwf_ed_print_diag(const gfa_t *g,
 	size_t n, gwf_diag_t *a) // for debugging only
@@ -939,8 +893,6 @@ void *gfa_ed_init(void *km, const gfa_edopt_t *opt, const gfa_t *g, const gfa_ed
 	z->g = g, z->es = es;
 	z->ql = ql, z->q = q;
 	z->buf.ha = gwf_set64_init2(km);
-	z->buf.ht = gwf_map64_init2(km);
-	kv_resize(gwf_trace_t, km, z->buf.t, 16);
 	KCALLOC(km, z->a, 1);
 	z->v0 = v0;
 	z->off0 = off0;
@@ -1009,10 +961,9 @@ void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_
 		++z->s;
 		if (gfa_ed_dbg >= 1) {
 			fprintf(gwf_wf_debug_fp(),
-			    "[%s] dist=%d, n=%d, n_intv=%ld,"
-				" n_tb=%ld\n", __func__, z->s,
-				z->n_a, z->buf.intv.n,
-				z->buf.t.n);
+			    "[%s] dist=%d, n=%d, n_intv=%ld\n",
+				__func__, z->s,
+				z->n_a, z->buf.intv.n);
 			if (gfa_ed_dbg == 4) {
 				gwf_ed_print_intv(
 					z->buf.intv.n,
@@ -1042,12 +993,10 @@ void gfa_ed_destroy(void *z_)
 	void *km = z->buf.km;
 	kfree(km, z->a);
 	gwf_set64_destroy(z->buf.ha);
-	gwf_map64_destroy(z->buf.ht);
 	kfree(km, z->buf.sort_buf.a);
 	kfree(km, z->buf.intv.a);
 	kfree(km, z->buf.tmp.a);
 	kfree(km, z->buf.swap.a);
-	kfree(km, z->buf.t.a);
 	kfree(km, z);
 }
 
