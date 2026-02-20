@@ -169,69 +169,70 @@ KHASHL_MAP_INIT(KH_LOCAL, gwf_map64_t, gwf_map64,
 KHASHL_INIT(KH_LOCAL, gwf_set64_t, gwf_set64,
 	uint64_t, kh_hash_dummy, kh_eq_generic)
 
-typedef struct {
-	/* Intervals (forbidden bands) */
-	gwf_intv_v intv, tmp, swap;
-	gwf_diag_v sort_buf;
-	/* Hash set (open addressing, linear probe) */
-	uint64_t  *ha_keys;
-	uint8_t   *ha_occ;
-	uint32_t  *ha_dirty;
-	uint32_t   ha_n_dirty;
-	/* Queue A (circular buffer) */
-	gwf_diag_t *A;
-	uint32_t    A_head, A_tail, A_count;
-	/* Ping-pong diag buffer pointers */
-	gwf_diag_t *diag_a, *diag_b;
-} gwf_edbuf_t;
+/* File-scope static arrays */
+static gwf_diag_t s_diag_a[DIAG_CAP];
+static gwf_diag_t s_diag_b[DIAG_CAP];
+static gwf_diag_t s_A[DIAG_CAP];
+static gwf_intv_t s_intv[INTV_CAP];
+static gwf_intv_t s_tmp[INTV_CAP];
+static gwf_intv_t s_swap[INTV_CAP];
+static gwf_diag_t s_sort_buf[DIAG_CAP];
+static uint64_t   s_ha_keys[HA_CAP];
+static uint8_t    s_ha_occ[HA_CAP];
+static uint32_t   s_ha_dirty[HA_CAP];
+
+/* File-scope mutable counters */
+static uint32_t s_ha_n_dirty;
+static uint32_t s_A_head, s_A_tail, s_A_count;
+static size_t   s_intv_n, s_tmp_n;
 
 /* ---- hash set helpers ---- */
-static inline void ha_clear(gwf_edbuf_t *buf) {
+static inline void ha_clear(void) {
 	uint32_t i;
-	for (i = 0; i < buf->ha_n_dirty; ++i)
-		buf->ha_occ[buf->ha_dirty[i]] = 0;
-	buf->ha_n_dirty = 0;
+	for (i = 0; i < s_ha_n_dirty; ++i)
+		s_ha_occ[s_ha_dirty[i]] = 0;
+	s_ha_n_dirty = 0;
 }
 
-static inline uint32_t ha_put(gwf_edbuf_t *buf,
+static inline uint32_t ha_put(
 	uint64_t key, int *absent)
 {
 	uint32_t h = (uint32_t)key * 2654435769U
 		>> (32 - HA_BITS);
-	while (buf->ha_occ[h]) {
-		if (buf->ha_keys[h] == key) {
+	while (s_ha_occ[h]) {
+		if (s_ha_keys[h] == key) {
 			*absent = 0;
 			return h;
 		}
 		h = (h + 1) & HA_MASK;
 	}
-	buf->ha_keys[h] = key;
-	buf->ha_occ[h] = 1;
-	buf->ha_dirty[buf->ha_n_dirty++] = h;
+	s_ha_keys[h] = key;
+	s_ha_occ[h] = 1;
+	s_ha_dirty[s_ha_n_dirty++] = h;
 	*absent = 1;
 	return h;
 }
 
 /* ---- queue A helpers ---- */
-static inline void A_clear(gwf_edbuf_t *buf) {
-	buf->A_head = buf->A_tail = buf->A_count = 0;
+static inline void A_clear(void) {
+	s_A_head = s_A_tail = s_A_count = 0;
 }
 
-static inline uint32_t A_size(gwf_edbuf_t *buf) {
-	return buf->A_count;
+static inline uint32_t A_size(void) {
+	return s_A_count;
 }
 
-static inline gwf_diag_t *A_pushp(gwf_edbuf_t *buf) {
+static inline gwf_diag_t *A_pushp(void) {
 	gwf_diag_t *p =
-		&buf->A[buf->A_tail++ & A_MASK];
-	buf->A_count++;
+		&s_A[s_A_tail++ & A_MASK];
+	s_A_count++;
 	return p;
 }
 
-static inline gwf_diag_t A_shift(gwf_edbuf_t *buf) {
+static inline gwf_diag_t A_shift(void) {
 	gwf_diag_t t =
-		buf->A[buf->A_head++ & A_MASK];
-	buf->A_count--;
+		s_A[s_A_head++ & A_MASK];
+	s_A_count--;
 	return t;
 }
 
@@ -318,26 +319,26 @@ static int32_t gwf_mixed_dedup(int32_t n_a,
 
 
 // remove diagonals not on the wavefront
-static int32_t gwf_dedup(gwf_edbuf_t *buf,
-	int32_t n_a, gwf_diag_t *a, int32_t n_sorted)
+static int32_t gwf_dedup(int32_t n_a,
+	gwf_diag_t *a, int32_t n_sorted)
 {
-	if (buf->intv.n + buf->tmp.n > 0) {
-		if (!gwf_intv_is_sorted(buf->tmp.n,
-			buf->tmp.a))
-			radix_sort_gwf_intv(buf->tmp.a,
-				buf->tmp.a + buf->tmp.n);
-		memcpy(buf->swap.a, buf->intv.a,
-			buf->intv.n * sizeof(gwf_intv_t));
-		buf->swap.n = buf->intv.n;
-		buf->intv.n = gwf_intv_merge2(buf->intv.a,
-			buf->swap.n, buf->swap.a,
-			buf->tmp.n, buf->tmp.a);
+	if (s_intv_n + s_tmp_n > 0) {
+		size_t swap_n;
+		if (!gwf_intv_is_sorted(s_tmp_n, s_tmp))
+			radix_sort_gwf_intv(s_tmp,
+				s_tmp + s_tmp_n);
+		memcpy(s_swap, s_intv,
+			s_intv_n * sizeof(gwf_intv_t));
+		swap_n = s_intv_n;
+		s_intv_n = gwf_intv_merge2(s_intv,
+			swap_n, s_swap, s_tmp_n, s_tmp);
 	}
-	n_a = gwf_diag_dedup(n_a, a, n_sorted,
-		&buf->sort_buf);
-	if (buf->intv.n > 0)
+	gwf_diag_v sb;
+	sb.a = s_sort_buf; sb.n = 0; sb.m = DIAG_CAP;
+	n_a = gwf_diag_dedup(n_a, a, n_sorted, &sb);
+	if (s_intv_n > 0)
 		n_a = gwf_mixed_dedup(n_a, a,
-			buf->intv.n, buf->intv.a);
+			s_intv_n, s_intv);
 	return n_a;
 }
 
@@ -375,7 +376,7 @@ static inline int32_t gwf_extend1(int32_t d, int32_t k,
 }
 
 // This is essentially Landau-Vishkin for linear sequences. The function speeds up alignment to long vertices. Not really necessary.
-static void gwf_ed_extend_batch(gwf_edbuf_t *buf,
+static void gwf_ed_extend_batch(
 	const subgfa_subgraph_t *sub,
 	int32_t ql, const char *q, int32_t n,
 	gwf_diag_t *a, gwf_diag_v *B)
@@ -419,7 +420,7 @@ static void gwf_ed_extend_batch(gwf_edbuf_t *buf,
 		gwf_diag_t *p = &a[j];
 		if (p->k == vl - 1 || (int32_t)p->vd
 			- GWF_DIAG_SHIFT + p->k == ql - 1)
-			*A_pushp(buf) = *p;
+			*A_pushp() = *p;
 	}
 	for (j = 0, m = 0; j < n + 2; ++j) {
 		gwf_diag_t *p = &b[j];
@@ -428,7 +429,7 @@ static void gwf_ed_extend_batch(gwf_edbuf_t *buf,
 			b[m++] = *p;
 		} else if (p->k == vl) {
 			gwf_intv_t *qi;
-			qi = &buf->tmp.a[buf->tmp.n++];
+			qi = &s_tmp[s_tmp_n++];
 			qi->vd0 = gwf_gen_vd(v, d);
 			qi->vd1 = qi->vd0 + 1;
 		}
@@ -440,7 +441,7 @@ static void gwf_ed_extend_batch(gwf_edbuf_t *buf,
 //affine gap, and 2) that we are doing base level
 //alignment
 // wfa_extend and wfa_next combined
-static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
+static gwf_diag_t *gwf_ed_extend(
 	const subgfa_subgraph_t *sub,
 	int32_t s, int32_t ql, const char *q,
 	uint32_t endV, int32_t endOff, int32_t *n_a_,
@@ -450,33 +451,32 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
 	gwf_diag_v B;
 	gwf_diag_t *b;
 
-	buf->tmp.n = 0;
-	ha_clear(buf); // hash table $h to avoid visiting a vertex twice
-	A_clear(buf); // $A is a queue
+	s_tmp_n = 0;
+	ha_clear(); // hash table $h to avoid visiting a vertex twice
+	A_clear(); // $A is a queue
 
 	/* B is the OTHER static buffer (ping-pong) */
-	B.a = (a == buf->diag_a)
-		? buf->diag_b : buf->diag_a;
+	B.a = (a == s_diag_a) ? s_diag_b : s_diag_a;
 	B.n = 0;
 	B.m = DIAG_CAP;
 
 	for (x = 0, i = 1; i <= n; ++i) {
 		if (i == n || a[i].vd != a[i-1].vd + 1) {
-			gwf_ed_extend_batch(buf, sub, ql, q,
+			gwf_ed_extend_batch(sub, ql, q,
 				i - x, &a[x], &B);
 			x = i;
 		}
 	}
-	if (A_size(buf) == 0) do_dedup = 0;
+	if (A_size() == 0) do_dedup = 0;
 	int32_t n_sorted = B.n;
 	// $a is not used as it has been copied to $A
 
-	while (A_size(buf)) {
+	while (A_size()) {
 		gwf_diag_t t;
 		uint32_t v;
 		int32_t d, k, i, vl;
 
-		t = A_shift(buf);
+		t = A_shift();
 		v = t.vd >> 32; // vertex
 		d = (int32_t)t.vd - GWF_DIAG_SHIFT; // diagonal
 		k = t.k; // wavefront position on the vertex
@@ -504,14 +504,14 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
 			const subgfa_arc_t *av =
 				subgfa_arc_a(sub, v);
 			gwf_intv_t *p;
-			p = &buf->tmp.a[buf->tmp.n++];
+			p = &s_tmp[s_tmp_n++];
 			p->vd0 = gwf_gen_vd(v, d);
 			p->vd1 = p->vd0 + 1;
 			for (j = 0; j < nv; ++j) {
 				uint32_t w = av[j].w;
 				int32_t ol = av[j].ow;
 				int absent;
-				ha_put(buf,
+				ha_put(
 					(uint64_t)w<<32 | (i + 1),
 					&absent);
 				if (q[i + 1] == (sub->graphSeq
@@ -519,7 +519,7 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
 					++n_ext;
 					if (absent) {
 						gwf_diag_t *dp;
-						dp = A_pushp(buf);
+						dp = A_pushp();
 						dp->vd = gwf_gen_vd(
 							w, i + 1 - ol);
 						dp->k = ol;
@@ -555,7 +555,7 @@ static gwf_diag_t *gwf_ed_extend(gwf_edbuf_t *buf,
 	*n_a_ = n = B.n, b = B.a;
 
 	if (do_dedup)
-		*n_a_ = n = gwf_dedup(buf, n, b, n_sorted);
+		*n_a_ = n = gwf_dedup(n, b, n_sorted);
 	return b;
 }
 
@@ -998,41 +998,15 @@ int gwfa(int32_t ql, const char *q,
 	subgfa_subgraph_t *sub, int32_t s_term,
 	int dbg)
 {
-	/* Static arrays */
-	static gwf_diag_t s_diag_a[DIAG_CAP];
-	static gwf_diag_t s_diag_b[DIAG_CAP];
-	static gwf_diag_t s_A[DIAG_CAP];
-	static gwf_intv_t s_intv[INTV_CAP];
-	static gwf_intv_t s_tmp[INTV_CAP];
-	static gwf_intv_t s_swap[INTV_CAP];
-	static gwf_diag_t s_sort_buf[DIAG_CAP];
-	static uint64_t   s_ha_keys[HA_CAP];
-	static uint8_t    s_ha_occ[HA_CAP];
-	static uint32_t   s_ha_dirty[HA_CAP];
-
-	gwf_edbuf_t buf;
 	gwf_diag_t *a;
 	int32_t n_a, s;
 	int terminate = 0;
 
-	/* Initialize buf */
-	memset(&buf, 0, sizeof(buf));
-	buf.intv.a = s_intv;   buf.intv.m = INTV_CAP;
-	buf.tmp.a = s_tmp;     buf.tmp.m = INTV_CAP;
-	buf.swap.a = s_swap;   buf.swap.m = INTV_CAP;
-	buf.sort_buf.a = s_sort_buf;
-	buf.sort_buf.m = DIAG_CAP;
-	buf.ha_keys = s_ha_keys;
-	buf.ha_occ  = s_ha_occ;
-	buf.ha_dirty = s_ha_dirty;
-	buf.A = s_A;
-	buf.diag_a = s_diag_a;
-	buf.diag_b = s_diag_b;
-
-	/* Clear ha_occ (static may have leftover from
-	 * previous call) */
+	/* Reset per-alignment counters */
+	s_intv_n = 0;
+	s_tmp_n = 0;
 	memset(s_ha_occ, 0, sizeof(s_ha_occ));
-	buf.ha_n_dirty = 0;
+	s_ha_n_dirty = 0;
 
 	/* Initial wavefront */
 	a = s_diag_a;
@@ -1042,7 +1016,7 @@ int gwfa(int32_t ql, const char *q,
 
 	s = 0;
 	while (n_a > 0) {
-		a = gwf_ed_extend(&buf, sub, s, ql, q,
+		a = gwf_ed_extend(sub, s, ql, q,
 			endV, endOff, &n_a, a, &terminate);
 		if (terminate || s >= s_term) break;
 		++s;
@@ -1051,10 +1025,9 @@ int gwfa(int32_t ql, const char *q,
 			fprintf(fp,
 				"[gfa_ed_step] dist=%d, n=%d,"
 				" n_intv=%zd, n_tb=0\n",
-				s, n_a, buf.intv.n);
+				s, n_a, s_intv_n);
 			fflush(fp);
-			gwf_ed_print_intv(buf.intv.n,
-				buf.intv.a);
+			gwf_ed_print_intv(s_intv_n, s_intv);
 			gwf_ed_print_wf(n_a, a);
 		}
 	}
