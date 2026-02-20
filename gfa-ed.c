@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <string.h>
 #include <stdio.h>
+#include <inttypes.h>
 #include "gfa-priv.h"
 #include "kalloc.h"
 #include "ksort.h"
@@ -11,6 +12,124 @@
 #define GFA_ED_DBG 0
 #endif
 int gfa_ed_dbg = GFA_ED_DBG;
+
+/*--- gwfa input dump (opt-in via -DDUMP_GWFA) ---*/
+#ifdef DUMP_GWFA
+#include <sys/stat.h>
+
+enum {
+	D_QL, D_Q, D_STARTV, D_STARTOFF,
+	D_ENDV, D_ENDOFF, D_STERM, D_DBG,
+	D_NVTX, D_NARC, D_GRAPHSEQ,
+	D_SEQOFF, D_SEQLEN,
+	D_ARCV, D_ARCW, D_ARCOW, D_IDX,
+	D_NFILES
+};
+static const char *dump_names[D_NFILES] = {
+	"ql.txt", "q.txt", "startV.txt", "startOff.txt",
+	"endV.txt", "endOff.txt", "s_term.txt", "dbg.txt",
+	"n_vtx.txt", "n_arc.txt", "graphSeq.txt",
+	"seq_off.txt", "seq_len.txt",
+	"arc_v.txt", "arc_w.txt", "arc_ow.txt", "idx.txt"
+};
+static FILE *dump_fps[D_NFILES];
+static int dump_inited;
+
+static void dump_init(void) {
+	int i;
+	char path[512];
+	if (dump_inited) return;
+	mkdir("GwfaDump", 0755);
+	for (i = 0; i < D_NFILES; i++) {
+		snprintf(path, sizeof(path),
+			"GwfaDump/%s", dump_names[i]);
+		dump_fps[i] = fopen(path, "w");
+	}
+	dump_inited = 1;
+}
+
+static void dump_gwfa_inputs(
+	int32_t ql, const char *q,
+	uint32_t startV, int32_t startOff,
+	uint32_t endV, int32_t endOff,
+	subgfa_subgraph_t *sub,
+	int32_t s_term, int dbg)
+{
+	uint32_t i;
+	dump_init();
+	/* scalars */
+	fprintf(dump_fps[D_QL], "%d\n", ql);
+	fprintf(dump_fps[D_Q], "%.*s\n", ql, q);
+	fprintf(dump_fps[D_STARTV], "%u\n", startV);
+	fprintf(dump_fps[D_STARTOFF], "%d\n", startOff);
+	fprintf(dump_fps[D_ENDV], "%u\n", endV);
+	fprintf(dump_fps[D_ENDOFF], "%d\n", endOff);
+	fprintf(dump_fps[D_STERM], "%d\n", s_term);
+	fprintf(dump_fps[D_DBG], "%d\n", dbg);
+	/* subgraph */
+	if (!sub) {
+		fprintf(dump_fps[D_NVTX], "0\n");
+		fprintf(dump_fps[D_NARC], "0\n");
+		fprintf(dump_fps[D_GRAPHSEQ], "\n");
+		fprintf(dump_fps[D_SEQOFF], "\n");
+		fprintf(dump_fps[D_SEQLEN], "\n");
+		fprintf(dump_fps[D_ARCV], "\n");
+		fprintf(dump_fps[D_ARCW], "\n");
+		fprintf(dump_fps[D_ARCOW], "\n");
+		fprintf(dump_fps[D_IDX], "\n");
+		return;
+	}
+	fprintf(dump_fps[D_NVTX], "%u\n", sub->n_vtx);
+	fprintf(dump_fps[D_NARC],
+		"%" PRIu64 "\n", sub->n_arc);
+	/* graphSeq: compute total length from last vtx */
+	{
+		uint32_t total = 0;
+		if (sub->n_vtx > 0)
+			total = sub->seq_off[sub->n_vtx - 1]
+				+ sub->seq_len[sub->n_vtx - 1];
+		fprintf(dump_fps[D_GRAPHSEQ],
+			"%.*s\n", (int)total, sub->graphSeq);
+	}
+	/* seq_off */
+	for (i = 0; i < sub->n_vtx; i++)
+		fprintf(dump_fps[D_SEQOFF], "%s%u",
+			i ? " " : "", sub->seq_off[i]);
+	fprintf(dump_fps[D_SEQOFF], "\n");
+	/* seq_len */
+	for (i = 0; i < sub->n_vtx; i++)
+		fprintf(dump_fps[D_SEQLEN], "%s%d",
+			i ? " " : "", sub->seq_len[i]);
+	fprintf(dump_fps[D_SEQLEN], "\n");
+	/* arcs */
+	for (i = 0; i < (uint32_t)sub->n_arc; i++)
+		fprintf(dump_fps[D_ARCV], "%s%u",
+			i ? " " : "", sub->arc[i].v);
+	fprintf(dump_fps[D_ARCV], "\n");
+	for (i = 0; i < (uint32_t)sub->n_arc; i++)
+		fprintf(dump_fps[D_ARCW], "%s%u",
+			i ? " " : "", sub->arc[i].w);
+	fprintf(dump_fps[D_ARCW], "\n");
+	for (i = 0; i < (uint32_t)sub->n_arc; i++)
+		fprintf(dump_fps[D_ARCOW], "%s%d",
+			i ? " " : "", sub->arc[i].ow);
+	fprintf(dump_fps[D_ARCOW], "\n");
+	/* idx */
+	for (i = 0; i < sub->n_vtx; i++)
+		fprintf(dump_fps[D_IDX], "%s%" PRIu64,
+			i ? " " : "", sub->idx[i]);
+	fprintf(dump_fps[D_IDX], "\n");
+}
+
+void dump_gwfa_flush(void) {
+	int i;
+	for (i = 0; i < D_NFILES; i++)
+		if (dump_fps[i]) {
+			fclose(dump_fps[i]);
+			dump_fps[i] = NULL;
+		}
+}
+#endif /* DUMP_GWFA */
 
 static FILE *gwf_scores_fp(void) {
 	static FILE *fp;
@@ -1064,6 +1183,11 @@ void gfa_ed_step(void *z_, uint32_t v1,
 		r->s = -1;
 		r->end_v = (uint32_t)-1;
 		r->end_off = -1;
+#ifdef DUMP_GWFA
+		dump_gwfa_inputs(z->ql, z->q,
+			0, z->off0, 0, off1,
+			NULL, s_term, gfa_ed_dbg);
+#endif
 		FILE *fp = gwf_scores_fp();
 		if (fp) {
 			fprintf(fp, "%d\n", -1);
@@ -1078,6 +1202,11 @@ void gfa_ed_step(void *z_, uint32_t v1,
 	rv1 = (seg_remap[v1 >> 1] << 1)
 		| (v1 & 1);
 
+#ifdef DUMP_GWFA
+	dump_gwfa_inputs(z->ql, z->q,
+		rv0, z->off0, rv1, off1,
+		sub, s_term, gfa_ed_dbg);
+#endif
 	int score = gwfa(z->ql, z->q,
 		rv0, z->off0, rv1, off1,
 		sub, s_term, gfa_ed_dbg);

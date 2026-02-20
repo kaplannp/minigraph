@@ -128,6 +128,10 @@ int gwfa(int32_t ql, const char *q,
 	subgfa_subgraph_t *sub, int32_t s_term,
 	int dbg);
 
+#ifdef DUMP_GWFA
+void dump_gwfa_flush(void);
+#endif
+
 // assembly related routines
 int gfa_arc_del_trans(gfa_t *g, int fuzz); // transitive reduction
 int gfa_arc_del_weak(gfa_t *g);
