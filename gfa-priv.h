@@ -122,6 +122,12 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 	int32_t **seg_remap_out);
 void subgfa_subgraph_destroy(subgfa_subgraph_t *sub);
 
+int gwfa(int32_t ql, const char *q,
+	uint32_t startV, int32_t startOff,
+	uint32_t endV, int32_t endOff,
+	subgfa_subgraph_t *sub, int32_t s_term,
+	int dbg);
+
 // assembly related routines
 int gfa_arc_del_trans(gfa_t *g, int fuzz); // transitive reduction
 int gfa_arc_del_weak(gfa_t *g);
