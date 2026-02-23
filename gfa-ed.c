@@ -189,7 +189,7 @@ void gfa_edseq_destroy(int32_t n_seg, gfa_edseq_t *es)
 
 /* Static array capacity constants */
 #define DIAG_CAP  (16 << 20)   /* 16M = 2^24 */
-#define INTV_CAP  (1 << 20)    /* 1M (~16 MB) */
+#define INTV_CAP  (1 << 21)    /* 2M (~32 MB) */
 #define HA_BITS   22           /* 4M slots */
 #define HA_CAP    (1 << HA_BITS)
 #define HA_MASK   (HA_CAP - 1)
