@@ -119,12 +119,20 @@ typedef struct {
 subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 	const gfa_edseq_t *es, uint32_t v0, uint32_t v1,
 	int32_t off0, int32_t off1, int32_t budget,
-	int32_t **seg_remap_out);
+	int32_t **seg_remap_out,
+	uint32_t *newStart_out,
+	uint32_t *newEnd_out);
 void subgfa_subgraph_destroy(subgfa_subgraph_t *sub);
 
-int gwfa(int32_t ql, const char *q,
+void subgfa_split_for_offsets(
+	subgfa_subgraph_t *sub,
 	uint32_t startV, int32_t startOff,
 	uint32_t endV, int32_t endOff,
+	uint32_t *newStart_out,
+	uint32_t *newEnd_out);
+
+int gwfa(int32_t ql, const char *q,
+	uint32_t startV, uint32_t endV,
 	subgfa_subgraph_t *sub, int32_t s_term,
 	int dbg);
 

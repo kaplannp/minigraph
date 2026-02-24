@@ -18,16 +18,16 @@ int gfa_ed_dbg = GFA_ED_DBG;
 #include <sys/stat.h>
 
 enum {
-	D_QL, D_Q, D_STARTV, D_STARTOFF,
-	D_ENDV, D_ENDOFF, D_STERM, D_DBG,
+	D_QL, D_Q, D_STARTV, D_ENDV,
+	D_STERM, D_DBG,
 	D_NVTX, D_NARC, D_GRAPHSEQ,
 	D_SEQOFF, D_SEQLEN,
 	D_ARCV, D_ARCW, D_ARCOW, D_IDX,
 	D_NFILES
 };
 static const char *dump_names[D_NFILES] = {
-	"ql.txt", "q.txt", "startV.txt", "startOff.txt",
-	"endV.txt", "endOff.txt", "s_term.txt", "dbg.txt",
+	"ql.txt", "q.txt", "startV.txt", "endV.txt",
+	"s_term.txt", "dbg.txt",
 	"n_vtx.txt", "n_arc.txt", "graphSeq.txt",
 	"seq_off.txt", "seq_len.txt",
 	"arc_v.txt", "arc_w.txt", "arc_ow.txt", "idx.txt"
@@ -50,8 +50,7 @@ static void dump_init(void) {
 
 static void dump_gwfa_inputs(
 	int32_t ql, const char *q,
-	uint32_t startV, int32_t startOff,
-	uint32_t endV, int32_t endOff,
+	uint32_t startV, uint32_t endV,
 	subgfa_subgraph_t *sub,
 	int32_t s_term, int dbg)
 {
@@ -61,9 +60,7 @@ static void dump_gwfa_inputs(
 	fprintf(dump_fps[D_QL], "%d\n", ql);
 	fprintf(dump_fps[D_Q], "%.*s\n", ql, q);
 	fprintf(dump_fps[D_STARTV], "%u\n", startV);
-	fprintf(dump_fps[D_STARTOFF], "%d\n", startOff);
 	fprintf(dump_fps[D_ENDV], "%u\n", endV);
-	fprintf(dump_fps[D_ENDOFF], "%d\n", endOff);
 	fprintf(dump_fps[D_STERM], "%d\n", s_term);
 	fprintf(dump_fps[D_DBG], "%d\n", dbg);
 	/* subgraph */
@@ -82,12 +79,14 @@ static void dump_gwfa_inputs(
 	fprintf(dump_fps[D_NVTX], "%u\n", sub->n_vtx);
 	fprintf(dump_fps[D_NARC],
 		"%" PRIu64 "\n", sub->n_arc);
-	/* graphSeq: compute total length from last vtx */
+	/* graphSeq: max(seq_off[v]+seq_len[v]) */
 	{
 		uint32_t total = 0;
-		if (sub->n_vtx > 0)
-			total = sub->seq_off[sub->n_vtx - 1]
-				+ sub->seq_len[sub->n_vtx - 1];
+		for (i = 0; i < sub->n_vtx; i++) {
+			uint32_t end = sub->seq_off[i]
+				+ sub->seq_len[i];
+			if (end > total) total = end;
+		}
 		fprintf(dump_fps[D_GRAPHSEQ],
 			"%.*s\n", (int)total, sub->graphSeq);
 	}
@@ -563,7 +562,7 @@ static void gwf_ed_extend_batch(
 static gwf_diag_t *gwf_ed_extend(
 	const subgfa_subgraph_t *sub,
 	int32_t s, int32_t ql, const char *q,
-	uint32_t endV, int32_t endOff, int32_t *n_a_,
+	uint32_t endV, int32_t *n_a_,
 	gwf_diag_t *a, int *terminate)
 {
 	int32_t i, x, n = *n_a_, do_dedup = 1;
@@ -654,20 +653,21 @@ static gwf_diag_t *gwf_ed_extend(
 				gwf_diag_push(&B,
 					v, d+1, k);
 		} else if (endV == (uint32_t)-1
-			|| (v == endV && k == endOff)) { // i + 1 == ql
+			|| (v == endV
+			&& k + 1 == vl)) {
 			*terminate = 1;
 			return 0;
-		} else if (k + 1 < vl) { // i + 1 == ql; reaching the end of the query but not the end of the vertex
+		} else if (k + 1 < vl) {
 			gwf_diag_push(&B, v, d-1, k+1);
-		} else if (v != endV) { // i + 1 == ql && k + 1 == vl; not reaching the last vertex $endV
-			int32_t nv = subgfa_arc_n(sub, v), j;
+		} else { // k+1==vl, v!=endV
+			int32_t nv =
+				subgfa_arc_n(sub, v), j;
 			const subgfa_arc_t *av =
 				subgfa_arc_a(sub, v);
 			for (j = 0; j < nv; ++j)
 				gwf_diag_push(&B,
 					av[j].w, i - av[j].ow,
 					av[j].ow);
-		} else { // may come here when k>endOff (due to banding); do nothing in this case
 		}
 	}
 
@@ -900,12 +900,53 @@ static void gwf_bfs_reachable(void *km,
 }
 
 /*
+ * Split vertex v at position splitOff in-place.
+ * Creates vL (seq[0..splitOff-1]) and vR
+ * (seq[splitOff..end]).
+ * Caller must pre-allocate +2 vertex and +1 arc headroom.
+ * Does NOT re-sort arcs or rebuild idx.
+ */
+static void subgfa_split_inplace(
+	subgfa_subgraph_t *sub,
+	uint32_t v, int32_t splitOff,
+	uint64_t n_arc, uint64_t *n_arc_out,
+	uint32_t *vL_out, uint32_t *vR_out)
+{
+	uint32_t vL = sub->n_vtx;
+	uint32_t vR = sub->n_vtx + 1;
+	sub->seq_off[vL] = sub->seq_off[v];
+	sub->seq_len[vL] = splitOff;
+	sub->seq_off[vR] = sub->seq_off[v] + splitOff;
+	sub->seq_len[vR] = sub->seq_len[v] - splitOff;
+	for (uint64_t i = 0; i < n_arc; i++) {
+		if (sub->arc[i].w == v) {
+			if (sub->arc[i].ow < splitOff)
+				sub->arc[i].w = vL;
+			else {
+				sub->arc[i].w = vR;
+				sub->arc[i].ow -= splitOff;
+			}
+		}
+		if (sub->arc[i].v == v)
+			sub->arc[i].v = vR;
+	}
+	sub->arc[n_arc] =
+		(subgfa_arc_t){vL, vR, 0};
+	sub->n_vtx += 2;
+	*n_arc_out = n_arc + 1;
+	*vL_out = vL;
+	*vR_out = vR;
+}
+
+/*
  * Build a compact subgraph from BFS-reachable vertices.
  */
 subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 	const gfa_edseq_t *es, uint32_t v0, uint32_t v1,
 	int32_t off0, int32_t off1, int32_t budget,
-	int32_t **seg_remap_out)
+	int32_t **seg_remap_out,
+	uint32_t *newStart_out,
+	uint32_t *newEnd_out)
 {
 	void *km = NULL;
 	gwf_set64_t *vset, *seg_set;
@@ -924,6 +965,8 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 	if (kh_size(vset) == 0) {
 		gwf_set64_destroy(vset);
 		*seg_remap_out = NULL;
+		*newStart_out = (uint32_t)-1;
+		*newEnd_out = (uint32_t)-1;
 		return NULL;
 	}
 
@@ -967,8 +1010,8 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 	sub->n_vtx = n_seg * 2;
 
 	// 5. Build concatenated graphSeq (both strands)
-	GFA_MALLOC(sub->seq_off, n_seg * 2);
-	GFA_MALLOC(sub->seq_len, n_seg * 2);
+	GFA_MALLOC(sub->seq_off, n_seg * 2 + 4);
+	GFA_MALLOC(sub->seq_len, n_seg * 2 + 4);
 	{
 		uint32_t total_len = 0;
 		for (i = 0; i < n_seg; ++i) {
@@ -1017,7 +1060,7 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 
 	// 8. Copy arcs with remapped segment IDs
 	sub->arc = (subgfa_arc_t*)malloc(
-		n_arc * sizeof(subgfa_arc_t));
+		(n_arc + 2) * sizeof(subgfa_arc_t));
 	arc_idx = 0;
 	for (k = 0; k < kh_end(vset); ++k) {
 		if (kh_exist(vset, k)) {
@@ -1043,13 +1086,75 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 		}
 	}
 
+	// 8b. Vertex splitting for start/end offsets
+	{
+		uint32_t rv0 =
+			(seg_remap[v0 >> 1] << 1)
+			| (v0 & 1);
+		uint32_t rv1 =
+			(seg_remap[v1 >> 1] << 1)
+			| (v1 & 1);
+		uint32_t newStart = rv0, newEnd = rv1;
+		if (rv0 == rv1) {
+			uint32_t v = rv0;
+			if (off0 > 0
+				&& off1 + 1
+				< sub->seq_len[v]) {
+				uint32_t vL1, vR1, vL2, vR2;
+				subgfa_split_inplace(sub, v,
+					off1 + 1, n_arc, &n_arc,
+					&vL1, &vR1);
+				subgfa_split_inplace(sub, vL1,
+					off0, n_arc, &n_arc,
+					&vL2, &vR2);
+				newStart = vR2;
+				newEnd = vR2;
+			} else if (off0 > 0) {
+				uint32_t vL, vR;
+				subgfa_split_inplace(sub, v,
+					off0, n_arc, &n_arc,
+					&vL, &vR);
+				newStart = vR;
+				newEnd = vR;
+			} else if (off1 + 1
+				< sub->seq_len[v]) {
+				uint32_t vL, vR;
+				subgfa_split_inplace(sub, v,
+					off1 + 1, n_arc, &n_arc,
+					&vL, &vR);
+				newStart = vL;
+				newEnd = vL;
+			}
+		} else {
+			if (off0 > 0) {
+				uint32_t vL, vR;
+				subgfa_split_inplace(sub,
+					rv0, off0, n_arc, &n_arc,
+					&vL, &vR);
+				newStart = vR;
+			}
+			if (off1 + 1
+				< sub->seq_len[rv1]) {
+				uint32_t vL, vR;
+				subgfa_split_inplace(sub,
+					rv1, off1 + 1,
+					n_arc, &n_arc,
+					&vL, &vR);
+				newEnd = vL;
+			}
+		}
+		sub->n_arc = n_arc;
+		*newStart_out = newStart;
+		*newEnd_out = newEnd;
+	}
+
 	// 9. Sort arcs by source v
 	radix_sort_subgfa_arc(sub->arc,
 		sub->arc + n_arc);
 
 	// 10. Build idx[] (size n_vtx)
 	sub->idx = (uint64_t*)calloc(
-		n_seg * 2, sizeof(uint64_t));
+		n_seg * 2 + 4, sizeof(uint64_t));
 	if (n_arc > 0) {
 		uint32_t cur_v = sub->arc[0].v;
 		uint64_t start = 0;
@@ -1085,6 +1190,98 @@ void subgfa_subgraph_destroy(subgfa_subgraph_t *sub)
 	free(sub);
 }
 
+void subgfa_split_for_offsets(
+	subgfa_subgraph_t *sub,
+	uint32_t startV, int32_t startOff,
+	uint32_t endV, int32_t endOff,
+	uint32_t *newStart_out,
+	uint32_t *newEnd_out)
+{
+	uint32_t newStart = startV, newEnd = endV;
+	uint64_t n_arc = sub->n_arc;
+	uint32_t i;
+
+	/* Realloc with headroom for up to 2 splits */
+	GFA_REALLOC(sub->seq_off, sub->n_vtx + 4);
+	GFA_REALLOC(sub->seq_len, sub->n_vtx + 4);
+	sub->arc = (subgfa_arc_t*)realloc(sub->arc,
+		(n_arc + 2) * sizeof(subgfa_arc_t));
+
+	if (startV == endV) {
+		uint32_t v = startV;
+		if (startOff > 0
+			&& endOff + 1
+			< sub->seq_len[v]) {
+			uint32_t vL1, vR1, vL2, vR2;
+			subgfa_split_inplace(sub, v,
+				endOff + 1, n_arc, &n_arc,
+				&vL1, &vR1);
+			subgfa_split_inplace(sub, vL1,
+				startOff, n_arc, &n_arc,
+				&vL2, &vR2);
+			newStart = vR2;
+			newEnd = vR2;
+		} else if (startOff > 0) {
+			uint32_t vL, vR;
+			subgfa_split_inplace(sub, v,
+				startOff, n_arc, &n_arc,
+				&vL, &vR);
+			newStart = vR;
+			newEnd = vR;
+		} else if (endOff + 1
+			< sub->seq_len[v]) {
+			uint32_t vL, vR;
+			subgfa_split_inplace(sub, v,
+				endOff + 1, n_arc, &n_arc,
+				&vL, &vR);
+			newStart = vL;
+			newEnd = vL;
+		}
+	} else {
+		if (startOff > 0) {
+			uint32_t vL, vR;
+			subgfa_split_inplace(sub, startV,
+				startOff, n_arc, &n_arc,
+				&vL, &vR);
+			newStart = vR;
+		}
+		if (endOff + 1 < sub->seq_len[endV]) {
+			uint32_t vL, vR;
+			subgfa_split_inplace(sub, endV,
+				endOff + 1, n_arc, &n_arc,
+				&vL, &vR);
+			newEnd = vL;
+		}
+	}
+	sub->n_arc = n_arc;
+
+	/* Re-sort arcs and rebuild idx */
+	radix_sort_subgfa_arc(sub->arc,
+		sub->arc + n_arc);
+	free(sub->idx);
+	sub->idx = (uint64_t*)calloc(
+		sub->n_vtx, sizeof(uint64_t));
+	if (n_arc > 0) {
+		uint32_t cur_v = sub->arc[0].v;
+		uint64_t start = 0;
+		for (i = 1; i <= (uint32_t)n_arc; ++i) {
+			if (i == (uint32_t)n_arc
+				|| sub->arc[i].v != cur_v) {
+				sub->idx[cur_v] =
+					(start << 32)
+					| (i - start);
+				if (i < (uint32_t)n_arc) {
+					cur_v = sub->arc[i].v;
+					start = i;
+				}
+			}
+		}
+	}
+
+	*newStart_out = newStart;
+	*newEnd_out = newEnd;
+}
+
 typedef struct {
 	const gfa_t *g; //graph
 	const gfa_edseq_t *es; //edit sequence?
@@ -1112,8 +1309,7 @@ void *gfa_ed_init(void *km, const gfa_edopt_t *opt,
 }
 
 int gwfa(int32_t ql, const char *q,
-	uint32_t startV, int32_t startOff,
-	uint32_t endV, int32_t endOff,
+	uint32_t startV, uint32_t endV,
 	subgfa_subgraph_t *sub, int32_t s_term,
 	int dbg)
 {
@@ -1130,13 +1326,13 @@ int gwfa(int32_t ql, const char *q,
 	/* Initial wavefront */
 	a = s_diag_a;
 	n_a = 1;
-	a[0].vd = gwf_gen_vd(startV, -startOff);
-	a[0].k = startOff - 1;
+	a[0].vd = gwf_gen_vd(startV, 0);
+	a[0].k = -1;
 
 	s = 0;
 	while (n_a > 0) {
 		a = gwf_ed_extend(sub, s, ql, q,
-			endV, endOff, &n_a, a, &terminate);
+			endV, &n_a, a, &terminate);
 		if (terminate || s >= s_term) break;
 		++s;
 		if (dbg >= 1) {
@@ -1177,7 +1373,8 @@ void gfa_ed_step(void *z_, uint32_t v1,
 	assert(v1 != (uint32_t)-1);
 	sub = subgfa_subgraph(z->g, z->es,
 		z->v0, v1, z->off0, off1,
-		z->ql + s_term, &seg_remap);
+		z->ql + s_term, &seg_remap,
+		&rv0, &rv1);
 
 	if (sub == NULL) {
 		r->s = -1;
@@ -1185,8 +1382,7 @@ void gfa_ed_step(void *z_, uint32_t v1,
 		r->end_off = -1;
 #ifdef DUMP_GWFA
 		dump_gwfa_inputs(z->ql, z->q,
-			0, z->off0, 0, off1,
-			NULL, s_term, gfa_ed_dbg);
+			0, 0, NULL, s_term, gfa_ed_dbg);
 #endif
 		FILE *fp = gwf_scores_fp();
 		if (fp) {
@@ -1196,20 +1392,12 @@ void gfa_ed_step(void *z_, uint32_t v1,
 		return;
 	}
 
-	// Remap start/end vertices to compact vertex space
-	rv0 = (seg_remap[z->v0 >> 1] << 1)
-		| (z->v0 & 1);
-	rv1 = (seg_remap[v1 >> 1] << 1)
-		| (v1 & 1);
-
 #ifdef DUMP_GWFA
 	dump_gwfa_inputs(z->ql, z->q,
-		rv0, z->off0, rv1, off1,
-		sub, s_term, gfa_ed_dbg);
+		rv0, rv1, sub, s_term, gfa_ed_dbg);
 #endif
 	int score = gwfa(z->ql, z->q,
-		rv0, z->off0, rv1, off1,
-		sub, s_term, gfa_ed_dbg);
+		rv0, rv1, sub, s_term, gfa_ed_dbg);
 	r->s = score;
 
 	{
