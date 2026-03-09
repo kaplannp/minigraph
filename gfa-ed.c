@@ -18,7 +18,7 @@ int gfa_ed_dbg = GFA_ED_DBG;
 #include <sys/stat.h>
 
 enum {
-	D_QL, D_Q, D_STARTV, D_ENDV,
+	D_QL, D_Q,
 	D_STERM, D_DBG,
 	D_NVTX, D_NARC, D_GRAPHSEQ,
 	D_SEQOFF, D_SEQLEN,
@@ -26,7 +26,7 @@ enum {
 	D_NFILES
 };
 static const char *dump_names[D_NFILES] = {
-	"ql.txt", "q.txt", "startV.txt", "endV.txt",
+	"ql.txt", "q.txt",
 	"s_term.txt", "dbg.txt",
 	"n_vtx.txt", "n_arc.txt", "graphSeq.txt",
 	"seq_off.txt", "seq_len.txt",
@@ -50,7 +50,6 @@ static void dump_init(void) {
 
 static void dump_gwfa_inputs(
 	int32_t ql, const char *q,
-	uint32_t startV, uint32_t endV,
 	subgfa_subgraph_t *sub,
 	int32_t s_term, int dbg)
 {
@@ -59,8 +58,6 @@ static void dump_gwfa_inputs(
 	/* scalars */
 	fprintf(dump_fps[D_QL], "%d\n", ql);
 	fprintf(dump_fps[D_Q], "%.*s\n", ql, q);
-	fprintf(dump_fps[D_STARTV], "%u\n", startV);
-	fprintf(dump_fps[D_ENDV], "%u\n", endV);
 	fprintf(dump_fps[D_STERM], "%d\n", s_term);
 	fprintf(dump_fps[D_DBG], "%d\n", dbg);
 	/* subgraph */
@@ -562,7 +559,7 @@ static void gwf_ed_extend_batch(
 static gwf_diag_t *gwf_ed_extend(
 	const subgfa_subgraph_t *sub,
 	int32_t s, int32_t ql, const char *q,
-	uint32_t endV, int32_t *n_a_,
+	int32_t *n_a_,
 	gwf_diag_t *a, int *terminate)
 {
 	int32_t i, x, n = *n_a_, do_dedup = 1;
@@ -652,9 +649,8 @@ static gwf_diag_t *gwf_ed_extend(
 			if (nv == 0 || n_ext != nv)
 				gwf_diag_push(&B,
 					v, d+1, k);
-		} else if (endV == (uint32_t)-1
-			|| (v == endV
-			&& k + 1 == vl)) {
+		} else if (v == 65535
+			&& k + 1 == vl) {
 			*terminate = 1;
 			return 0;
 		} else if (k + 1 < vl) {
@@ -1144,32 +1140,82 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 			}
 		}
 		sub->n_arc = n_arc;
-		*newStart_out = newStart;
-		*newEnd_out = newEnd;
-	}
 
-	// 9. Sort arcs by source v
-	radix_sort_subgfa_arc(sub->arc,
-		sub->arc + n_arc);
+		/* 9. Remap endpoints to fixed IDs */
+		{
+			uint32_t old_n = sub->n_vtx;
+			uint32_t *new_id = (uint32_t*)malloc(
+				old_n * sizeof(uint32_t));
+			uint32_t next = 1, j;
+			for (j = 0; j < old_n; j++) {
+				if (j == newStart)
+					new_id[j] = 0;
+				else if (j == newEnd)
+					new_id[j] = 65535;
+				else {
+					if (next == 65535) next++;
+					new_id[j] = next++;
+				}
+			}
+			/* Remap seq_off, seq_len */
+			{
+				uint32_t *noff =
+					(uint32_t*)calloc(
+					65536, sizeof(uint32_t));
+				int32_t *nlen =
+					(int32_t*)calloc(
+					65536, sizeof(int32_t));
+				for (j = 0; j < old_n; j++) {
+					noff[new_id[j]] =
+						sub->seq_off[j];
+					nlen[new_id[j]] =
+						sub->seq_len[j];
+				}
+				free(sub->seq_off);
+				free(sub->seq_len);
+				sub->seq_off = noff;
+				sub->seq_len = nlen;
+			}
+			/* Remap arc endpoints */
+			{
+				uint64_t ai;
+				for (ai = 0; ai < n_arc; ai++) {
+					sub->arc[ai].v =
+						new_id[sub->arc[ai].v];
+					sub->arc[ai].w =
+						new_id[sub->arc[ai].w];
+				}
+			}
+			free(new_id);
+		}
 
-	// 10. Build idx[] (size n_vtx)
-	sub->idx = (uint64_t*)calloc(
-		n_seg * 2 + 4, sizeof(uint64_t));
-	if (n_arc > 0) {
-		uint32_t cur_v = sub->arc[0].v;
-		uint64_t start = 0;
-		for (i = 1; i <= (uint32_t)n_arc; ++i) {
-			if (i == (uint32_t)n_arc
-				|| sub->arc[i].v != cur_v) {
-				sub->idx[cur_v] =
-					(start << 32)
-					| (i - start);
-				if (i < (uint32_t)n_arc) {
-					cur_v = sub->arc[i].v;
-					start = i;
+		/* 10. Sort arcs + build idx (65536) */
+		radix_sort_subgfa_arc(sub->arc,
+			sub->arc + n_arc);
+		sub->idx = (uint64_t*)calloc(
+			65536, sizeof(uint64_t));
+		if (n_arc > 0) {
+			uint32_t cur_v = sub->arc[0].v;
+			uint64_t start = 0;
+			for (i = 1; i <= (uint32_t)n_arc;
+				++i) {
+				if (i == (uint32_t)n_arc
+					|| sub->arc[i].v
+					!= cur_v) {
+					sub->idx[cur_v] =
+						(start << 32)
+						| (i - start);
+					if (i < (uint32_t)n_arc) {
+						cur_v =
+							sub->arc[i].v;
+						start = i;
+					}
 				}
 			}
 		}
+		sub->n_vtx = 65536;
+		*newStart_out = 0;
+		*newEnd_out = 65535;
 	}
 
 	// 11. Free BFS temporaries; return seg_remap
@@ -1309,7 +1355,6 @@ void *gfa_ed_init(void *km, const gfa_edopt_t *opt,
 }
 
 int gwfa(int32_t ql, const char *q,
-	uint32_t startV, uint32_t endV,
 	subgfa_subgraph_t *sub, int32_t s_term,
 	int dbg)
 {
@@ -1326,13 +1371,13 @@ int gwfa(int32_t ql, const char *q,
 	/* Initial wavefront */
 	a = s_diag_a;
 	n_a = 1;
-	a[0].vd = gwf_gen_vd(startV, 0);
+	a[0].vd = gwf_gen_vd(0, 0);
 	a[0].k = -1;
 
 	s = 0;
 	while (n_a > 0) {
 		a = gwf_ed_extend(sub, s, ql, q,
-			endV, &n_a, a, &terminate);
+			&n_a, a, &terminate);
 		if (terminate || s >= s_term) break;
 		++s;
 		if (dbg >= 1) {
@@ -1382,7 +1427,7 @@ void gfa_ed_step(void *z_, uint32_t v1,
 		r->end_off = -1;
 #ifdef DUMP_GWFA
 		dump_gwfa_inputs(z->ql, z->q,
-			0, 0, NULL, s_term, gfa_ed_dbg);
+			NULL, s_term, gfa_ed_dbg);
 #endif
 		FILE *fp = gwf_scores_fp();
 		if (fp) {
@@ -1394,10 +1439,10 @@ void gfa_ed_step(void *z_, uint32_t v1,
 
 #ifdef DUMP_GWFA
 	dump_gwfa_inputs(z->ql, z->q,
-		rv0, rv1, sub, s_term, gfa_ed_dbg);
+		sub, s_term, gfa_ed_dbg);
 #endif
 	int score = gwfa(z->ql, z->q,
-		rv0, rv1, sub, s_term, gfa_ed_dbg);
+		sub, s_term, gfa_ed_dbg);
 	r->s = score;
 
 	{

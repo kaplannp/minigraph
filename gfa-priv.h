@@ -132,7 +132,6 @@ void subgfa_split_for_offsets(
 	uint32_t *newEnd_out);
 
 int gwfa(int32_t ql, const char *q,
-	uint32_t startV, uint32_t endV,
 	subgfa_subgraph_t *sub, int32_t s_term,
 	int dbg);
 
