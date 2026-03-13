@@ -649,7 +649,7 @@ static gwf_diag_t *gwf_ed_extend(
 			if (nv == 0 || n_ext != nv)
 				gwf_diag_push(&B,
 					v, d+1, k);
-		} else if (v == 65535
+		} else if (v == 2
 			&& k + 1 == vl) {
 			*terminate = 1;
 			return 0;
@@ -935,6 +935,71 @@ static void subgfa_split_inplace(
 }
 
 /*
+ * Trim-split left: keeps right piece at ID v,
+ * moves left piece to new vL.
+ * Used for start vertex so rv0 keeps its ID.
+ */
+static void subgfa_split_trim_left(
+	subgfa_subgraph_t *sub,
+	uint32_t v, int32_t splitOff,
+	uint64_t n_arc, uint64_t *n_arc_out,
+	uint32_t *vL_out)
+{
+	uint32_t vL = sub->n_vtx;
+	sub->seq_off[vL] = sub->seq_off[v];
+	sub->seq_len[vL] = splitOff;
+	sub->seq_off[v] += splitOff;
+	sub->seq_len[v] -= splitOff;
+	for (uint64_t i = 0; i < n_arc; i++) {
+		if (sub->arc[i].w == v) {
+			if (sub->arc[i].ow < splitOff)
+				sub->arc[i].w = vL;
+			else
+				sub->arc[i].ow -= splitOff;
+		}
+	}
+	sub->arc[n_arc] =
+		(subgfa_arc_t){vL, v, 0};
+	sub->n_vtx += 1;
+	*n_arc_out = n_arc + 1;
+	*vL_out = vL;
+}
+
+/*
+ * Trim-split right: keeps left piece at ID v,
+ * moves right piece to new vR.
+ * Used for end vertex so rv1 keeps its ID.
+ */
+static void subgfa_split_trim_right(
+	subgfa_subgraph_t *sub,
+	uint32_t v, int32_t splitOff,
+	uint64_t n_arc, uint64_t *n_arc_out,
+	uint32_t *vR_out)
+{
+	uint32_t vR = sub->n_vtx;
+	sub->seq_off[vR] =
+		sub->seq_off[v] + splitOff;
+	sub->seq_len[vR] =
+		sub->seq_len[v] - splitOff;
+	sub->seq_len[v] = splitOff;
+	for (uint64_t i = 0; i < n_arc; i++) {
+		if (sub->arc[i].w == v) {
+			if (sub->arc[i].ow >= splitOff) {
+				sub->arc[i].w = vR;
+				sub->arc[i].ow -= splitOff;
+			}
+		}
+		if (sub->arc[i].v == v)
+			sub->arc[i].v = vR;
+	}
+	sub->arc[n_arc] =
+		(subgfa_arc_t){v, vR, 0};
+	sub->n_vtx += 1;
+	*n_arc_out = n_arc + 1;
+	*vR_out = vR;
+}
+
+/*
  * Build a compact subgraph from BFS-reachable vertices.
  */
 subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
@@ -982,14 +1047,31 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 	}
 	gwf_set64_destroy(seg_set);
 
-	// 3. Sort segment IDs (insertion sort, n_seg small)
-	for (i = 1; i < n_seg; ++i) {
-		uint32_t tmp = segs[i], j = i;
-		while (j > 0 && segs[j - 1] > tmp) {
-			segs[j] = segs[j - 1];
-			--j;
+	// 3. Pre-sort: segs[0]=v0>>1, segs[1]=v1>>1,
+	//    rest sorted from index 2+
+	assert((v0 >> 1) != (v1 >> 1));
+	{
+		uint32_t s0 = v0 >> 1, s1 = v1 >> 1;
+		for (i = 0; i < n_seg; ++i)
+			if (segs[i] == s0) {
+				segs[i] = segs[0];
+				segs[0] = s0;
+				break;
+			}
+		for (i = 1; i < n_seg; ++i)
+			if (segs[i] == s1) {
+				segs[i] = segs[1];
+				segs[1] = s1;
+				break;
+			}
+		for (i = 3; i < n_seg; ++i) {
+			uint32_t tmp = segs[i], j = i;
+			while (j > 2 && segs[j - 1] > tmp) {
+				segs[j] = segs[j - 1];
+				--j;
+			}
+			segs[j] = tmp;
 		}
-		segs[j] = tmp;
 	}
 
 	// Build reverse mapping: old_seg -> new_seg
@@ -1082,7 +1164,7 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 		}
 	}
 
-	// 8b. Vertex splitting for start/end offsets
+	// 8b. Trim-split for start/end offsets
 	{
 		uint32_t rv0 =
 			(seg_remap[v0 >> 1] << 1)
@@ -1090,132 +1172,95 @@ subgfa_subgraph_t *subgfa_subgraph(const gfa_t *g,
 		uint32_t rv1 =
 			(seg_remap[v1 >> 1] << 1)
 			| (v1 & 1);
-		uint32_t newStart = rv0, newEnd = rv1;
-		if (rv0 == rv1) {
-			uint32_t v = rv0;
-			if (off0 > 0
-				&& off1 + 1
-				< sub->seq_len[v]) {
-				uint32_t vL1, vR1, vL2, vR2;
-				subgfa_split_inplace(sub, v,
-					off1 + 1, n_arc, &n_arc,
-					&vL1, &vR1);
-				subgfa_split_inplace(sub, vL1,
-					off0, n_arc, &n_arc,
-					&vL2, &vR2);
-				newStart = vR2;
-				newEnd = vR2;
-			} else if (off0 > 0) {
-				uint32_t vL, vR;
-				subgfa_split_inplace(sub, v,
-					off0, n_arc, &n_arc,
-					&vL, &vR);
-				newStart = vR;
-				newEnd = vR;
-			} else if (off1 + 1
-				< sub->seq_len[v]) {
-				uint32_t vL, vR;
-				subgfa_split_inplace(sub, v,
-					off1 + 1, n_arc, &n_arc,
-					&vL, &vR);
-				newStart = vL;
-				newEnd = vL;
-			}
-		} else {
-			if (off0 > 0) {
-				uint32_t vL, vR;
-				subgfa_split_inplace(sub,
-					rv0, off0, n_arc, &n_arc,
-					&vL, &vR);
-				newStart = vR;
-			}
-			if (off1 + 1
-				< sub->seq_len[rv1]) {
-				uint32_t vL, vR;
-				subgfa_split_inplace(sub,
-					rv1, off1 + 1,
-					n_arc, &n_arc,
-					&vL, &vR);
-				newEnd = vL;
-			}
+		if (off0 > 0) {
+			uint32_t vL;
+			subgfa_split_trim_left(sub,
+				rv0, off0,
+				n_arc, &n_arc, &vL);
+		}
+		if (off1 + 1 < sub->seq_len[rv1]) {
+			uint32_t vR;
+			subgfa_split_trim_right(sub,
+				rv1, off1 + 1,
+				n_arc, &n_arc, &vR);
 		}
 		sub->n_arc = n_arc;
 
-		/* 9. Remap endpoints to fixed IDs */
-		{
-			uint32_t old_n = sub->n_vtx;
-			uint32_t *new_id = (uint32_t*)malloc(
-				old_n * sizeof(uint32_t));
-			uint32_t next = 1, j;
-			for (j = 0; j < old_n; j++) {
-				if (j == newStart)
-					new_id[j] = 0;
-				else if (j == newEnd)
-					new_id[j] = 65535;
-				else {
-					if (next == 65535) next++;
-					new_id[j] = next++;
-				}
-			}
-			/* Remap seq_off, seq_len */
-			{
-				uint32_t *noff =
-					(uint32_t*)calloc(
-					65536, sizeof(uint32_t));
-				int32_t *nlen =
-					(int32_t*)calloc(
-					65536, sizeof(int32_t));
-				for (j = 0; j < old_n; j++) {
-					noff[new_id[j]] =
-						sub->seq_off[j];
-					nlen[new_id[j]] =
-						sub->seq_len[j];
-				}
-				free(sub->seq_off);
-				free(sub->seq_len);
-				sub->seq_off = noff;
-				sub->seq_len = nlen;
-			}
-			/* Remap arc endpoints */
-			{
-				uint64_t ai;
-				for (ai = 0; ai < n_arc; ai++) {
-					sub->arc[ai].v =
-						new_id[sub->arc[ai].v];
-					sub->arc[ai].w =
-						new_id[sub->arc[ai].w];
-				}
-			}
-			free(new_id);
-		}
-
-		/* 10. Sort arcs + build idx (65536) */
-		radix_sort_subgfa_arc(sub->arc,
-			sub->arc + n_arc);
-		sub->idx = (uint64_t*)calloc(
-			65536, sizeof(uint64_t));
-		if (n_arc > 0) {
-			uint32_t cur_v = sub->arc[0].v;
-			uint64_t start = 0;
-			for (i = 1; i <= (uint32_t)n_arc;
-				++i) {
-				if (i == (uint32_t)n_arc
-					|| sub->arc[i].v
-					!= cur_v) {
-					sub->idx[cur_v] =
-						(start << 32)
-						| (i - start);
-					if (i < (uint32_t)n_arc) {
-						cur_v =
-							sub->arc[i].v;
-						start = i;
-					}
-				}
+		/* 9. Swap rv0→0 and rv1→2 so endpoints
+		 * are at fixed IDs regardless of orient.
+		 * Pre-sort guarantees rv0∈{0,1}, rv1∈{2,3}
+		 * so the two swaps don't interfere. */
+		if (rv0 != 0) {
+			uint32_t a = rv0, b = 0;
+			uint32_t t32;
+			int32_t ti32;
+			t32 = sub->seq_off[a];
+			sub->seq_off[a] = sub->seq_off[b];
+			sub->seq_off[b] = t32;
+			ti32 = sub->seq_len[a];
+			sub->seq_len[a] = sub->seq_len[b];
+			sub->seq_len[b] = ti32;
+			for (uint64_t ai = 0;
+				ai < n_arc; ai++) {
+				if (sub->arc[ai].v == a)
+					sub->arc[ai].v = b;
+				else if (sub->arc[ai].v == b)
+					sub->arc[ai].v = a;
+				if (sub->arc[ai].w == a)
+					sub->arc[ai].w = b;
+				else if (sub->arc[ai].w == b)
+					sub->arc[ai].w = a;
 			}
 		}
-		sub->n_vtx = 65536;
+		if (rv1 != 2) {
+			uint32_t a = rv1, b = 2;
+			uint32_t t32;
+			int32_t ti32;
+			t32 = sub->seq_off[a];
+			sub->seq_off[a] = sub->seq_off[b];
+			sub->seq_off[b] = t32;
+			ti32 = sub->seq_len[a];
+			sub->seq_len[a] = sub->seq_len[b];
+			sub->seq_len[b] = ti32;
+			for (uint64_t ai = 0;
+				ai < n_arc; ai++) {
+				if (sub->arc[ai].v == a)
+					sub->arc[ai].v = b;
+				else if (sub->arc[ai].v == b)
+					sub->arc[ai].v = a;
+				if (sub->arc[ai].w == a)
+					sub->arc[ai].w = b;
+				else if (sub->arc[ai].w == b)
+					sub->arc[ai].w = a;
+			}
+		}
 		*newStart_out = 0;
-		*newEnd_out = 65535;
+		*newEnd_out = 2;
+	}
+
+	// 10. Sort arcs + build idx (compact)
+	radix_sort_subgfa_arc(sub->arc,
+		sub->arc + n_arc);
+	sub->idx = (uint64_t*)calloc(
+		sub->n_vtx, sizeof(uint64_t));
+	if (n_arc > 0) {
+		uint32_t cur_v = sub->arc[0].v;
+		uint64_t start = 0;
+		for (i = 1; i <= (uint32_t)n_arc;
+			++i) {
+			if (i == (uint32_t)n_arc
+				|| sub->arc[i].v
+				!= cur_v) {
+				sub->idx[cur_v] =
+					(start << 32)
+					| (i - start);
+				if (i < (uint32_t)n_arc) {
+					cur_v =
+						sub->arc[i].v;
+					start = i;
+				}
+			}
+		}
 	}
 
 	// 11. Free BFS temporaries; return seg_remap
