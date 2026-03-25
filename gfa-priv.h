@@ -92,9 +92,15 @@ typedef struct {
 	int32_t *v; //nodes on the path
 } gfa_edrst_t;
 
+typedef struct {
+	int64_t subgraph_us;
+	int64_t gwfa_us;
+} gfa_edtiming_t;
+
 void gfa_edopt_init(gfa_edopt_t *opt);
 void *gfa_ed_init(void *km, const gfa_edopt_t *opt, const gfa_t *g, const gfa_edseq_t *es, int32_t ql, const char *q, uint32_t v0, int32_t off0);
 void gfa_ed_step(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_t *r);
+void gfa_ed_step_timed(void *z_, uint32_t v1, int32_t off1, int32_t s_term, gfa_edrst_t *r, gfa_edtiming_t *timing);
 void gfa_ed_destroy(void *z_);
 
 int32_t gfa_edit_dist(void *km, const gfa_edopt_t *opt, const gfa_t *g, const gfa_edseq_t *es, int32_t ql, const char *q, uint32_t v0, int32_t off0, gfa_edrst_t *rst);
